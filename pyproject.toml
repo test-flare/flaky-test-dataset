@@ -1,0 +1,24 @@
+[project]
+name = "workflow_miner"
+description = "Mines GitHub CI actions for flaky workflows."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "dotenv>=0.9.9",
+    "gitpython>=3.1.46",
+    "numpy>=2.2.6",
+    "pygithub>=2.8.1",
+    "tqdm>=4.67.3",
+]
+dynamic = ["version"]
+
+[tool.setuptools_scm]
+write_to = "src/_version.py"
+
+[tool.black]
+# https://github.com/psf/black
+line-length = 120
+target-version = ["py310"]
+
+[tool.isort]
+profile = "black"
