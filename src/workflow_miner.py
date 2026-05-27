@@ -251,7 +251,7 @@ def main():
     parser.add_argument("-n", "--repo-name", help="Name of the repo.", required=True)
     parser.add_argument(
         "-b",
-        "--base_branch",
+        "--base-branch",
         help="Base branch to consider when looking at pull requests. Defaults to `main`.",
         default="main",
     )
@@ -260,7 +260,7 @@ def main():
         "-m",
         "--max-runs",
         help=(
-            "Maximum number of runs to consider. "
+            "Maximum number of runs to collect. "
             "Useful for larger repos to avoid hitting the rate limit. Defaults to 50."
         ),
         default=50,
