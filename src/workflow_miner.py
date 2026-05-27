@@ -8,18 +8,17 @@ import json
 import os
 import tomllib
 import zipfile
-from datetime import datetime
 from tempfile import TemporaryDirectory
 from tqdm import tqdm
 import argparse
 import re
+from multiprocessing import Pool
 
 import git
 import requests
 from dotenv import load_dotenv
 from github import Auth, Github, Repository
-from numpy import linspace
-
+from datetime import datetime, timedelta
 
 load_dotenv()
 
@@ -59,18 +58,23 @@ class RepoMiner:
     def __init__(
         self,
         github_token: str,
+        repo_owner: str,
         repo_name: str,
-        local_repo: str,
+        local_repo_path: str,
         base_branch: str,
         workflow_name: str,
         max_runs: int = 50,
     ):
         self.github_token = github_token
+        self.repo_owner = repo_owner
         self.repo_name = repo_name
-        self.local_repo = git.Repo(local_repo)
+        self.local_repo = git.Repo(local_repo_path)
         self.base_branch = base_branch
         self.workflow_name = workflow_name
         self.max_runs = max_runs
+
+        self.local_repo.git.checkout(self.base_branch)
+        self.local_repo.git.fetch()
 
     def requires_python(self, sha: str):
         """
@@ -97,7 +101,6 @@ class RepoMiner:
 
         :param test_id: The full identifier of the test,
                         e.g. "tests/components/bang_olufsen/test_event.py::test_button_event_creation_a5".
-        :param commit_sample_size: How many commits to return in the sample.
         """
         # Find the commit that introduced the test function definition
         try:
@@ -114,7 +117,8 @@ class RepoMiner:
                 "introduction_date": introduction_date,
             }
 
-        except git.exc.GitCommandError:
+        except git.exc.GitCommandError as e:
+            print(e)
             return None
 
     def get_run_metadata(self, remote: Repository, run: dict) -> dict:
@@ -124,34 +128,46 @@ class RepoMiner:
         :param remote: The GitHub Repository.
         :param run: The workflow run.
         """
-        log_url = f"https://api.github.com/repos/{self.repo_name}/actions/runs/{run['id']}/attempts/1/logs"
+        log_url = (
+            f"https://api.github.com/repos/{self.repo_owner}/{self.repo_name}/actions/runs/{run['id']}/attempts/1/logs"
+        )
         headers = {"Authorization": f"token {self.github_token}"}
 
         response = requests.get(log_url, headers=headers, timeout=30)
         pulls = remote.get_commit(run["head_sha"]).get_pulls()
+
+        print(f"RUN: {run['id']} {run['event']} {response.status_code} {pulls.totalCount}")
+        os.makedirs(f"runs/{run['id']}", exist_ok=True)
+        with open(f"runs/{run['id']}/{run['id']}.zip", "wb") as f:
+            f.write(response.content)
 
         if response.status_code == 200 and pulls.totalCount > 0:
             pr = pulls[0]
             failed_tests = []
             for test_id in get_failed_tests_from_logs(response.content):
                 test_metadata = self.get_test_metadata(test_id)
+                print(f"  {test_id}: {test_metadata}")
                 if test_metadata:
                     failed_tests.append({"test_id": test_id} | test_metadata)
+            print(f"  {len(failed_tests)} failed tests")
 
             if failed_tests:
                 return {
                     "run_id": run["id"],
                     "run_attempt": run["run_attempt"],
+                    "created_at": run["created_at"],
                     "failed_tests": failed_tests,
-                    "pr_number": pr.number,
-                    "pr_title": pr.title,
-                    "pr_created_at": pr.created_at.isoformat(),
-                    # The Merge Commit created by GitHub for the CI run
-                    "merge_commit_sha": run["head_sha"],
-                    # The Source (Feature Branch) commit
-                    "source_sha": pr.head.sha,
-                    # The Target (Base Branch, e.g., dev) commit
-                    "target_sha": pr.base.sha,
+                    "pull_request": {
+                        "number": pr.number,
+                        "title": pr.title,
+                        "created_at": pr.created_at.isoformat(),
+                        # The Merge Commit created by GitHub for the CI run
+                        "merge_sha": run["head_sha"],
+                        # The Source (Feature Branch) commit
+                        "source_sha": pr.head.sha,
+                        # The Target (Base Branch, e.g., dev) commit
+                        "target_sha": pr.base.sha,
+                    },
                 }
         return None
 
@@ -159,21 +175,30 @@ class RepoMiner:
         """
         Main entrypoint. Scrape the repo and save the result to JSON.
         """
-        output_dir = os.path.join("data", *self.repo_name.split("/"))
+        output_dir = os.path.join("data", self.repo_owner, self.repo_name)
+        output_file = os.path.join(output_dir, f"{self.base_branch}.json")
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
 
-        remote = Github(auth=Auth.Token(self.github_token)).get_repo(self.repo_name)
+        remote = Github(auth=Auth.Token(self.github_token)).get_repo(f"{self.repo_owner}/{self.repo_name}")
         found_count = 0
-        data = []
 
-        # url = f"https://api.github.com/repos/{repo_name}/actions/runs"
-        url = f"https://api.github.com/repos/{self.repo_name}/actions/workflows/{self.workflow_name}/runs"
+        data = []
+        if os.path.exists(output_file):
+            with open(output_file) as f:
+                data = json.load(f)
+
+        url = f"https://api.github.com/repos/{self.repo_owner}/{self.repo_name}/actions/runs"
+        # Github only keeps run logs for a maximum of 90 days for public repos
+        date_90_days_ago = (datetime.now() - timedelta(days=90)).strftime("%Y-%m-%d")
         params = {
             # "state": "closed",
             "status": "completed",
+            "event": "pull_request",
+            "conclusion": "success",
             "base": self.base_branch,
-            # "name": WORKFLOW_NAME,
+            "name": self.workflow_name,
+            "created": f">={date_90_days_ago}",
             "sort": "updated",
             "direction": "desc",
             "per_page": 100,
@@ -196,24 +221,14 @@ class RepoMiner:
             )
             print(f"  {len(viable_runs)} viable runs")
 
-            for run in tqdm(viable_runs):
+            # for run in tqdm(viable_runs):
+            for run in viable_runs:
                 metadata = self.get_run_metadata(remote, run)
-                if metadata is not None:
+                if metadata is not None and metadata not in data:
                     data.append(metadata)
                     found_count += 1
 
-            # with Pool() as pool:
-            #     metadata = list(
-            #         filter(
-            #             lambda x: x is not None,
-            #             pool.starmap(
-            #                 get_run_metadata,
-            #                 map(lambda run: (remote, run), viable_runs),
-            #             ),
-            #         )
-            #     )
-
-            with open(os.path.join(output_dir, f"{self.base_branch}.json"), "w") as f:
+            with open(output_file, "w") as f:
                 json.dump(data, f, indent=2)
             if "next" in response.links and url:
                 url = response.links["next"]["url"]
@@ -226,8 +241,14 @@ def main():
         prog="workflow_miner", description="Scrape GitHub CI actions in search of flaky tests."
     )
 
-    parser.add_argument("-t", "--github-token", help="GitHub token. If supplied, this value overrides the .env file.")
-    parser.add_argument("-r", "--repo-name", help="Identifier of the repo, in the form {user}/{repo}.")
+    parser.add_argument(
+        "-t",
+        "--github-token",
+        help="GitHub token. If supplied, this value overrides the .env file.",
+        default=os.getenv("GITHUB_TOKEN"),
+    )
+    parser.add_argument("-o", "--repo-owner", help="Github owner of the repo.", required=True)
+    parser.add_argument("-n", "--repo-name", help="Name of the repo.", required=True)
     parser.add_argument(
         "-b",
         "--base_branch",
@@ -245,17 +266,21 @@ def main():
         default=50,
         type=int,
     )
-    parser.add_argument("-l", "--local-repo", help="Path to clone the remote repo.")
+    parser.add_argument("-l", "--local-repo-path", help="Path to clone the remote repo.")
     args = parser.parse_args()
     if not args.github_token:
-        args.github_token = os.getenv("GITHUB_TOKEN")
-    if not args.github_token:
-        raise ValueError("You must provide a GitHub authentication token.")
+        raise ValueError("Please provide a GitHub authentication token either via the -t option of a .env file.")
+    if not args.local_repo_path:
+        args.local_repo_path = os.path.join("repos", args.repo_owner, args.repo_name)
+    os.makedirs(args.local_repo_path, exist_ok=True)
+    if not os.listdir(args.local_repo_path):
+        git.Repo.clone_from(f"https://github.com/{args.repo_owner}/{args.repo_name}.git", args.local_repo_path)
 
     repo_miner = RepoMiner(
         github_token=args.github_token,
+        repo_owner=args.repo_owner,
         repo_name=args.repo_name,
-        local_repo=args.local_repo,
+        local_repo_path=args.local_repo_path,
         base_branch=args.base_branch,
         workflow_name=args.workflow_name,
         max_runs=args.max_runs,
