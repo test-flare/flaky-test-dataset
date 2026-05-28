@@ -1,21 +1,48 @@
-# See https://pre-commit.com for more information
-# See https://pre-commit.com/hooks.html for more hooks
 repos:
-- repo: https://github.com/PyCQA/isort
-  rev: 6.0.1 # Use the latest version
-  hooks:
-    - id: isort
-- repo: https://github.com/ambv/black
-  rev: 25.1.0
-  hooks:
-    - id: black
-      language_version: python3.11
-- repo: local
-  hooks:
-    - id: pylint
-      name: pylint
-      entry: pylint
-      language: system
-      types: [python]
-      args: ['--max-line-length=120', '--max-positional-arguments=12']
-      files: ^src/|^tests/
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+        files: ^causal_testing/
+      - id: end-of-file-fixer
+        files: ^causal_testing/
+      - id: check-added-large-files
+        files: ^causal_testing/
+      - id: check-merge-conflict
+        files: ^causal_testing/
+      - id: debug-statements
+        files: ^causal_testing/
+      - id: mixed-line-ending
+        files: ^causal_testing/
+      - id: check-json
+        files: ^data/
+
+  - repo: https://github.com/psf/black
+    rev: 25.9.0
+    hooks:
+      - id: black
+        args: ['--line-length=120', '--target-version=py310']
+        files: ^causal_testing/
+
+  - repo: https://github.com/pycqa/isort
+    rev: 7.0.0
+    hooks:
+      - id: isort
+        args: ['--profile', 'black', '--line-length', '120']
+        files: ^causal_testing/
+
+  - repo: local
+    hooks:
+      - id: pylint
+        name: pylint
+        entry: pylint
+        language: system
+        types: [python]
+        args: ['--rcfile=.pylintrc', '--max-line-length=120', '--max-positional-arguments=12', '--disable=W1401']
+        files: ^causal_testing/
+
+  - repo: https://github.com/jsh9/pydoclint
+    rev: 0.8.3
+    hooks:
+      - id: pydoclint
+        args: [--style=google, --check-return-types=False]

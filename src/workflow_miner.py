@@ -3,22 +3,22 @@ This module uses the  GitHub API to look for actions that were run, failed, reru
 Results are saved to JSON in the specified location.
 """
 
+import argparse
 import io
 import json
 import os
+import re
 import tomllib
 import zipfile
-from tempfile import TemporaryDirectory
-from tqdm import tqdm
-import argparse
-import re
+from datetime import datetime, timedelta
 from multiprocessing import Pool
+from tempfile import TemporaryDirectory
 
 import git
 import requests
 from dotenv import load_dotenv
 from github import Auth, Github, Repository
-from datetime import datetime, timedelta
+from tqdm import tqdm
 
 load_dotenv()
 
@@ -31,7 +31,7 @@ def parse_test_failures(log: str) -> list[str]:
     """
     failed_tests = []
     # Pytest failure pattern in logs: FAILED path/to/test.py::test_name
-    pytest_fail_regex = re.compile(r"(FAILED|ERROR|FLAKY)\s+([\w\/\.\d_]+::[\w\d_]+)")
+    pytest_fail_regex = re.compile(r"(FAILED|ERROR|FLAKY)\s+([\w\/\.\d_]+(::[\w\d_]+){1, 2})")
     matches = pytest_fail_regex.findall(log)
     for m in matches:
         if m not in failed_tests:

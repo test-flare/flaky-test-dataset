@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "FlakyTestDataset",
+  "description": "A list of failed GitHub Action runs and their associated failing tests.",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "required": ["run_id", "run_attempt", "created_at", "failed_tests", "pull_request"],
+    "properties": {
+      "run_id": {
+        "type": "integer",
+        "description": "The unique identifier for the GitHub Action run."
+      },
+      "run_attempt": {
+        "type": "integer",
+        "minimum": 1,
+        "description": "The attempt number of the workflow run."
+      },
+      "created_at": {
+        "type": "string",
+        "format": "date-time",
+        "description": "The ISO 8601 timestamp when the run was created."
+      },
+      "failed_tests": {
+        "type": "array",
+        "description": "A list of tests that failed during this run.",
+        "items": {
+          "type": "object",
+          "required": ["test_id", "introduced_in", "introduction_date"],
+          "properties": {
+            "test_id": {
+              "type": "string",
+              "description": "The identifier/path of the failed test."
+            },
+            "introduced_in": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$",
+              "description": "The full Git SHA where the test was first introduced."
+            },
+            "introduction_date": {
+              "type": "string",
+              "format": "date-time",
+              "description": "The timestamp when the test was introduced."
+            }
+          }
+        }
+      },
+      "pull_request": {
+        "type": "object",
+        "description": "Metadata about the pull request associated with the run.",
+        "required": ["number", "title", "created_at", "merge_sha", "source_sha", "target_sha"],
+        "properties": {
+          "number": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "The pull request number."
+          },
+          "title": {
+            "type": "string",
+            "description": "The title of the pull request."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "The ISO 8601 timestamp when the PR was created."
+          },
+          "merge_sha": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{40}$",
+            "description": "The merge commit SHA."
+          },
+          "source_sha": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{40}$",
+            "description": "The head/source branch commit SHA."
+          },
+          "target_sha": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{40}$",
+            "description": "The base/target branch commit SHA."
+          }
+        }
+      }
+    }
+  }
+}
