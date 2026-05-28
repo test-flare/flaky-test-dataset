@@ -8,11 +8,9 @@ import io
 import json
 import os
 import re
-import tomllib
 import zipfile
 from datetime import datetime, timedelta
-from multiprocessing import Pool
-from tempfile import TemporaryDirectory
+
 
 import git
 import requests
@@ -75,22 +73,6 @@ class RepoMiner:
 
         self.local_repo.git.checkout(self.base_branch)
         self.local_repo.git.fetch()
-
-    def requires_python(self, sha: str):
-        """
-        Returns the required python version string (if found) for a given commit sha.
-        :param sha: The commit sha.
-        """
-
-        with TemporaryDirectory() as worktree_path:
-            self.local_repo.git.worktree("add", worktree_path, sha)
-            if os.path.exists(f"{worktree_path}/.python_version"):
-                with open(f"{worktree_path}/.python_version") as f:
-                    return "\n".join(f.readlines()).strip()
-            if os.path.exists(f"{worktree_path}/pyproject.toml"):
-                with open(f"{worktree_path}/pyproject.toml", "rb") as f:
-                    return tomllib.load(f).get("project", {}).get("requires-python", "")
-        return ""
 
     def get_test_metadata(
         self,
