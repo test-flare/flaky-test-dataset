@@ -11,7 +11,6 @@ import re
 import tomllib
 import zipfile
 from datetime import datetime, timedelta
-from multiprocessing import Pool
 from tempfile import TemporaryDirectory
 
 import git
@@ -30,12 +29,12 @@ def parse_test_failures(log: str) -> list[str]:
     :returns: A list of the identifiers of the failed tests.
     """
     failed_tests = []
-    # Pytest failure pattern in logs: FAILED path/to/test.py::test_name
-    pytest_fail_regex = re.compile(r"(FAILED|ERROR|FLAKY)\s+([\w\/\.\d_]+(::[\w\d_]+){1, 2})")
+    # Pytest failure pattern in logs: FAILED path/to/test.py::class_name::test_name
+    pytest_fail_regex = re.compile(r"(FAILED|ERROR|FLAKY)\s+([\w\/\._]+(::[\w_]+)?(::[\w_]+))")
     matches = pytest_fail_regex.findall(log)
     for m in matches:
         if m not in failed_tests:
-            failed_tests.append(m[-1])
+            failed_tests.append(m[1])
     return failed_tests
 
 
@@ -55,7 +54,11 @@ def get_failed_tests_from_logs(zip_content: str):
 
 
 class RepoMiner:
-    def __init__(
+    """
+    Class to mine a given repo.
+    """
+
+    def __init__(  # pylint: disable=R0913,R0917
         self,
         github_token: str,
         repo_owner: str,
@@ -92,10 +95,7 @@ class RepoMiner:
                     return tomllib.load(f).get("project", {}).get("requires-python", "")
         return ""
 
-    def get_test_metadata(
-        self,
-        test_id: str,
-    ) -> dict:
+    def get_test_metadata(self, test_id: str) -> dict:
         """
         Finds the commit that introduced a test.
 
@@ -136,7 +136,6 @@ class RepoMiner:
         response = requests.get(log_url, headers=headers, timeout=30)
         pulls = remote.get_commit(run["head_sha"]).get_pulls()
 
-        print(f"RUN: {run['id']} {run['event']} {response.status_code} {pulls.totalCount}")
         os.makedirs(f"runs/{run['id']}", exist_ok=True)
         with open(f"runs/{run['id']}/{run['id']}.zip", "wb") as f:
             f.write(response.content)
@@ -146,10 +145,8 @@ class RepoMiner:
             failed_tests = []
             for test_id in get_failed_tests_from_logs(response.content):
                 test_metadata = self.get_test_metadata(test_id)
-                print(f"  {test_id}: {test_metadata}")
                 if test_metadata:
                     failed_tests.append({"test_id": test_id} | test_metadata)
-            print(f"  {len(failed_tests)} failed tests")
 
             if failed_tests:
                 return {
@@ -171,9 +168,9 @@ class RepoMiner:
                 }
         return None
 
-    def scrape_repo(self):
+    def mine_repo(self):
         """
-        Main entrypoint. Scrape the repo and save the result to JSON.
+        Mine the repo for failed actions and save the result to JSON.
         """
         output_dir = os.path.join("data", self.repo_owner, self.repo_name)
         output_file = os.path.join(output_dir, f"{self.base_branch}.json")
@@ -189,16 +186,14 @@ class RepoMiner:
                 data = json.load(f)
 
         url = f"https://api.github.com/repos/{self.repo_owner}/{self.repo_name}/actions/runs"
-        # Github only keeps run logs for a maximum of 90 days for public repos
-        date_90_days_ago = (datetime.now() - timedelta(days=90)).strftime("%Y-%m-%d")
         params = {
-            # "state": "closed",
             "status": "completed",
             "event": "pull_request",
             "conclusion": "success",
             "base": self.base_branch,
             "name": self.workflow_name,
-            "created": f">={date_90_days_ago}",
+            # Github only keeps run logs for a maximum of 90 days for public repos
+            "created": f">={(datetime.now() - timedelta(days=90)).strftime('%Y-%m-%d')}",
             "sort": "updated",
             "direction": "desc",
             "per_page": 100,
@@ -221,8 +216,7 @@ class RepoMiner:
             )
             print(f"  {len(viable_runs)} viable runs")
 
-            # for run in tqdm(viable_runs):
-            for run in viable_runs:
+            for run in tqdm(viable_runs):
                 metadata = self.get_run_metadata(remote, run)
                 if metadata is not None and metadata not in data:
                     data.append(metadata)
@@ -285,7 +279,7 @@ def main():
         workflow_name=args.workflow_name,
         max_runs=args.max_runs,
     )
-    repo_miner.scrape_repo()
+    repo_miner.mine_repo()
 
 
 if __name__ == "__main__":
