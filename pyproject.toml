@@ -4,6 +4,7 @@ description = "Mines GitHub CI actions for flaky workflows."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "docker>=7.1.0",
     "dotenv>=0.9.9",
     "gitpython>=3.1.46",
     "numpy>=2.2.6",
