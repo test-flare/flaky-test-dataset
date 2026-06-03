@@ -118,20 +118,17 @@ class RepoMiner:
         response = requests.get(log_url, headers=headers, timeout=30)
         pulls = remote.get_commit(run["head_sha"]).get_pulls()
 
-        print(f"RUN: {run['id']} {run['event']} {response.status_code} {pulls.totalCount}")
         os.makedirs(f"runs/{run['id']}", exist_ok=True)
         with open(f"runs/{run['id']}/{run['id']}.zip", "wb") as f:
             f.write(response.content)
 
         if response.status_code == 200 and pulls.totalCount > 0:
             pr = pulls[0]
-            failed_tests = []
+            failed_tests = {}
             for test_id in get_failed_tests_from_logs(response.content):
                 test_metadata = self.get_test_metadata(test_id)
-                print(f"  {test_id}: {test_metadata}")
                 if test_metadata:
-                    failed_tests.append({"test_id": test_id} | test_metadata)
-            print(f"  {len(failed_tests)} failed tests")
+                    failed_tests[test_id] = test_metadata
 
             if failed_tests:
                 return {
@@ -203,8 +200,7 @@ class RepoMiner:
             )
             print(f"  {len(viable_runs)} viable runs")
 
-            # for run in tqdm(viable_runs):
-            for run in viable_runs:
+            for run in tqdm(viable_runs):
                 metadata = self.get_run_metadata(remote, run)
                 if metadata is not None and metadata not in data:
                     data.append(metadata)
