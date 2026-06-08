@@ -3,20 +3,22 @@ Test that the data follows the predefined schema.
 """
 
 import json
-import os
 from glob import glob
 import pytest
 import jsonschema
 
 
 @pytest.mark.parametrize(
-    "filename",
-    [pytest.param(filename, id=filename) for filename in filter(os.path.isfile, glob("data/**/*", recursive=True))],
+    "repo",
+    [pytest.param(repo, id=repo) for repo in glob("data/*/*", recursive=True)],
 )
-def test_json_syntax(filename):
-    assert filename.endswith(".json"), f"{filename} not a json file."
+def test_json_data_present(repo):
+    data_files = glob(f"{repo}/*.json")
+    assert data_files, f"No JSON file found for repo {repo}."
     with open("schemas/actions.schema.json") as f:
         schema = json.load(f)
-    with open(filename) as f:
-        runs = json.load(f)
-    jsonschema.protocols.Validator.validate(runs, schema)
+    for data_file in data_files:
+        with open(data_file) as f:
+            runs = json.load(f)
+        assert runs, f"Data for {data_file} is empty"
+        jsonschema.protocols.Validator.validate(runs, schema)
