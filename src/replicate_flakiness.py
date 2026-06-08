@@ -2,9 +2,12 @@ import json
 import argparse
 from multiprocessing import Pool
 import docker
+import os
 from tqdm import tqdm
 
 from workflow_miner import parse_test_failures
+
+BASE_DIR = "data"
 
 
 class FlakinessReplicator:
@@ -12,8 +15,9 @@ class FlakinessReplicator:
     Class to manage the replication of flaky test behaviour.
     """
 
-    def __init__(self, container_name: str):
-        self.container_name = container_name
+    def __init__(self, repo_owner: str, repo_name: str):
+        self.repo_owner = repo_owner
+        self.repo_name = repo_name
 
     def run_command(self, container: docker.models.containers.Container, command: str) -> str:
         """
@@ -39,7 +43,12 @@ class FlakinessReplicator:
         :return: Dictionary of the number of `passes` and `failures` for each test case.
         """
         client = docker.from_env()
-        container = client.containers.run(self.container_name, entrypoint="bash", detach=True, tty=True)
+        image, _ = client.images.build(
+            path=os.path.join(BASE_DIR, self.repo_owner, self.repo_name),
+            # tag=f"{self.repo_owner.lower()}:{self.repo_name.lower()}",
+            rm=True,  # Remove intermediate containers after a successful build
+        )
+        container = client.containers.run(image, entrypoint="bash", detach=True, tty=True)
 
         results = {test: {"passes": 0, "failures": 0} for test in tests_to_check}
 
@@ -71,13 +80,12 @@ def get_args() -> argparse.Namespace:
         prog="replicate_flakiness", description="Attempt to replicate the flaky tests from a given repo."
     )
 
-    parser.add_argument(
-        "-j", "--input-json", help="The location of the JSON file containing the test data.", required=True
-    )
-    parser.add_argument("-c", "--container-name", help="Name of the docker container.", required=True)
     parser.add_argument("-r", "--run-ids", help="IDs of the run to replicate.", type=int, nargs="+")
+    parser.add_argument("-o", "--repo-owner", help="The name of the repo owner.", required=True)
+    parser.add_argument("-n", "--repo-name", help="The name of the repo.", required=True)
+    parser.add_argument("-b", "--branch-name", help="The name of the branch.", required=True)
     parser.add_argument(
-        "-o", "--output-json", help="Where to save the output. Defaults to overwriting the input JSON data."
+        "-O", "--output-json", help="Where to save the output. Defaults to updating the input JSON data."
     )
     parser.add_argument(
         "-m",
@@ -95,6 +103,7 @@ def get_args() -> argparse.Namespace:
     )
 
     args = parser.parse_args()
+    args.input_json = os.path.join(BASE_DIR, args.repo_owner, args.repo_name, f"{args.branch_name}.json")
     if not args.output_json:
         args.output_json = args.input_json
     return args
@@ -115,7 +124,7 @@ def main():
     else:
         matching_runs = runs
 
-    flakiness_replicator = FlakinessReplicator(container_name=args.container_name)
+    flakiness_replicator = FlakinessReplicator(repo_owner=args.repo_owner, repo_name=args.repo_name)
 
     if args.threads is not None:
         with Pool(args.threads) as pool:
