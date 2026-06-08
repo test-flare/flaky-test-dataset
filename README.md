@@ -32,6 +32,24 @@ Each object has the following structure:
 ```
 
 # Collecting Additional Data
+
+## Setup
+
+1. Create a new python virtual environment
+```
+virtualenv venv
+```
+2. Activate the virtual environment
+```
+source venv/bin/activate
+```
+3. Install the package
+```
+pip install .
+```
+
+### Collecting data
+
 To update a repo or collect data from a new repo, you can run `src/workflow-miner.py` with the following arguments.
 ```
   -h, --help            show this help message and exit
