@@ -9,6 +9,7 @@ WORKDIR /home/flakehunter
 
 # Install system dependencies required for Home Assistant core
 RUN apt-get update && apt-get install -y \
+    bash \
     git \
     libudev-dev \
     libavformat-dev \
@@ -32,9 +33,9 @@ RUN git clone https://github.com/home-assistant/core.git; \
 # Install pytest and the flake-fighting plugin
 RUN pip install --no-cache-dir uv pytest pytest-flakefighters
 
-# Copy the entrypoint script
-COPY --chown=1002:1002 entrypoint.sh entrypoint.sh
+# Copy the scripts
 COPY --chown=1002:1002 setup.sh setup.sh
-RUN chmod +x entrypoint.sh setup.sh
+COPY --chown=1002:1002 test.sh test.sh
+RUN chmod +x setup.sh test.sh
 RUN mkdir outputs && chmod 777 outputs
-ENV PATH="$PATH:/home/flakehunter/.local/bin"
+# ENV PATH="$PATH:/home/flakehunter/.local/bin"
