@@ -62,7 +62,11 @@ class FlakinessReplicator:
             container.remove()
 
 
-def get_args():
+def get_args() -> argparse.Namespace:
+    """
+    Parse commandline arguments.
+    :returns: Namespace containing the supplied arguments.
+    """
     parser = argparse.ArgumentParser(
         prog="replicate_flakiness", description="Attempt to replicate the flaky tests from a given repo."
     )
@@ -71,7 +75,7 @@ def get_args():
         "-j", "--input-json", help="The location of the JSON file containing the test data.", required=True
     )
     parser.add_argument("-c", "--container-name", help="Name of the docker container.", required=True)
-    parser.add_argument("-r", "--run-id", help="ID of the run to replicate.")
+    parser.add_argument("-r", "--run-id", help="ID of the run to replicate.", type=int)
     parser.add_argument(
         "-o", "--output-json", help="Where to save the output. Defaults to overwriting the input JSON data."
     )
@@ -101,6 +105,8 @@ def main():
         runs = json.load(f)
     if args.run_id:
         runs = [run for run in runs if run["run_id"] == args.run_id]
+        if not runs:
+            raise ValueError(f"No run found with id {args.run_id}.")
 
     flakiness_replicator = FlakinessReplicator(container_name=args.container_name)
 
@@ -112,9 +118,9 @@ def main():
             )
         for run, flaky in zip(runs, flakiness):
             run["failed_tests"] = {
-                test_id: metadata | flaky[test_id] for test_id, metadata in runs["failed_tests"].items()
+                test_id: metadata | flaky[test_id] for test_id, metadata in run["failed_tests"].items()
             }
-        with open(args.json_file, "w") as f:
+        with open(args.output_json, "w") as f:
             json.dump(runs, f, indent=2)
     else:
         for run in runs:
@@ -123,7 +129,7 @@ def main():
             run["failed_tests"] = {
                 test_id: metadata | flaky[test_id] for test_id, metadata in run["failed_tests"].items()
             }
-        with open(args.json_file, "w") as f:
+        with open(args.output_json, "w") as f:
             json.dump(runs, f, indent=2)
 
 
