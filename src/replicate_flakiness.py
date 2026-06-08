@@ -75,12 +75,16 @@ def get_args() -> argparse.Namespace:
         "-j", "--input-json", help="The location of the JSON file containing the test data.", required=True
     )
     parser.add_argument("-c", "--container-name", help="Name of the docker container.", required=True)
-    parser.add_argument("-r", "--run-id", help="ID of the run to replicate.", type=int)
+    parser.add_argument("-r", "--run-ids", help="IDs of the run to replicate.", type=int, nargs="+")
     parser.add_argument(
         "-o", "--output-json", help="Where to save the output. Defaults to overwriting the input JSON data."
     )
     parser.add_argument(
-        "-m", "--max-repeats", type=int, help="Maximum number of repeats to run when looking for flaky behaviour."
+        "-m",
+        "--max-repeats",
+        type=int,
+        default=2,
+        help="Maximum number of repeats to run when looking for flaky behaviour.",
     )
     parser.add_argument(
         "-t",
@@ -103,10 +107,13 @@ def main():
     args = get_args()
     with open(args.input_json) as f:
         runs = json.load(f)
-    if args.run_id:
-        runs = [run for run in runs if run["run_id"] == args.run_id]
-        if not runs:
-            raise ValueError(f"No run found with id {args.run_id}.")
+    if args.run_ids:
+        matching_runs = [run for run in runs if run["run_id"] in args.run_ids]
+        failed_ids = set(args.run_ids) - set(map(lambda run: run["run_id"], matching_runs))
+        if failed_ids:
+            raise ValueError(f"No run found with id {failed_ids}.")
+    else:
+        matching_runs = runs
 
     flakiness_replicator = FlakinessReplicator(container_name=args.container_name)
 
@@ -114,18 +121,23 @@ def main():
         with Pool(args.threads) as pool:
             flakiness = pool.starmap(
                 flakiness_replicator.replicate_flakiness,
-                [(run["pull_request"]["source_sha"], list(run["failed_tests"])) for run in runs],
+                [
+                    (run["pull_request"]["source_sha"], list(run["failed_tests"]), args.max_repeats)
+                    for run in matching_runs
+                ],
             )
-        for run, flaky in zip(runs, flakiness):
+        for run, flaky in zip(matching_runs, flakiness):
             run["failed_tests"] = {
                 test_id: metadata | flaky[test_id] for test_id, metadata in run["failed_tests"].items()
             }
         with open(args.output_json, "w") as f:
             json.dump(runs, f, indent=2)
     else:
-        for run in runs:
+        for run in matching_runs:
             print(run["pull_request"]["source_sha"])
-            flaky = flakiness_replicator.replicate_flakiness(run["pull_request"]["source_sha"], run["failed_tests"])
+            flaky = flakiness_replicator.replicate_flakiness(
+                run["pull_request"]["source_sha"], run["failed_tests"], repeats=args.max_repeats
+            )
             run["failed_tests"] = {
                 test_id: metadata | flaky[test_id] for test_id, metadata in run["failed_tests"].items()
             }
