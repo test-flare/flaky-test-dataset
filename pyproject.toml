@@ -1,5 +1,5 @@
 [project]
-name = "workflow_miner"
+name = "flaky_test_dataset"
 description = "Mines GitHub CI actions for flaky workflows."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -28,5 +28,10 @@ profile = "black"
 test = [
     "jsonschema>=4.26.0",
     "pre-commit>=4.6.0",
+    "pytest>=9.0.3",
+]
+dev = [
+    "coverage>=7.14.1",
+    "jsonschema>=4.26.0",
     "pytest>=9.0.3",
 ]

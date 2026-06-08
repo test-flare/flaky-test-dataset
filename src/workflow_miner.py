@@ -15,7 +15,7 @@ from datetime import datetime, timedelta
 import git
 import requests
 from dotenv import load_dotenv
-from github import Auth, Github, Repository
+from github import Auth, Github
 from tqdm import tqdm
 
 load_dotenv()
@@ -37,7 +37,7 @@ def parse_test_failures(log: str) -> list[str]:
     return failed_tests
 
 
-def get_failed_tests_from_logs(zip_content: str):
+def get_failed_tests_from_logs(zip_content: bytes):
     """
     Take the zip output and parse test failures from the log.
     :param zip_content: The content of the zip file.
@@ -62,21 +62,32 @@ class RepoMiner:
         github_token: str,
         repo_owner: str,
         repo_name: str,
-        local_repo_path: str,
         base_branch: str,
         workflow_name: str,
         max_runs: int = 50,
+        local_repo_path: str = None,
     ):
         self.github_token = github_token
         self.repo_owner = repo_owner
         self.repo_name = repo_name
-        self.local_repo = git.Repo(local_repo_path)
         self.base_branch = base_branch
         self.workflow_name = workflow_name
         self.max_runs = max_runs
 
+        if local_repo_path is None:
+            local_repo_path = os.path.join("repos", self.repo_owner, self.repo_name)
+            os.makedirs(local_repo_path, exist_ok=True)
+        # If the directory is not empty, assume the repo is already cloned and ready to go
+        if os.listdir(local_repo_path):
+            self.local_repo = git.Repo(local_repo_path)
+        else:
+            self.local_repo = git.Repo.clone_from(
+                f"https://github.com/{self.repo_owner}/{self.repo_name}.git", local_repo_path
+            )
+
         self.local_repo.git.checkout(self.base_branch)
         self.local_repo.git.fetch()
+        self.remote = Github(auth=Auth.Token(self.github_token)).get_repo(f"{self.repo_owner}/{self.repo_name}")
 
     def get_test_metadata(
         self,
@@ -107,11 +118,10 @@ class RepoMiner:
             print(e)
             return None
 
-    def get_run_metadata(self, remote: Repository, run: dict) -> dict:
+    def get_run_metadata(self, run: dict) -> dict:
         """
         Finds the commit hashes associated with the run, and identifies flaky test candidates.
 
-        :param remote: The GitHub Repository.
         :param run: The workflow run.
         """
         log_url = (
@@ -120,7 +130,7 @@ class RepoMiner:
         headers = {"Authorization": f"token {self.github_token}"}
 
         response = requests.get(log_url, headers=headers, timeout=30)
-        pulls = remote.get_commit(run["head_sha"]).get_pulls()
+        pulls = self.remote.get_commit(run["head_sha"]).get_pulls()
 
         os.makedirs(f"runs/{run['id']}", exist_ok=True)
         with open(f"runs/{run['id']}/{run['id']}.zip", "wb") as f:
@@ -163,7 +173,6 @@ class RepoMiner:
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
 
-        remote = Github(auth=Auth.Token(self.github_token)).get_repo(f"{self.repo_owner}/{self.repo_name}")
         found_count = 0
 
         data = []
@@ -203,7 +212,7 @@ class RepoMiner:
             print(f"  {len(viable_runs)} viable runs")
 
             for run in tqdm(viable_runs):
-                metadata = self.get_run_metadata(remote, run)
+                metadata = self.get_run_metadata(run)
                 if metadata is not None and metadata not in data:
                     data.append(metadata)
                     found_count += 1
@@ -237,6 +246,11 @@ def main():
     )
     parser.add_argument("-w", "--workflow-name", help="Name of the workflow to consider, e.g. tests.yaml.")
     parser.add_argument(
+        "-r",
+        "--local-repo-path",
+        help="Location of the repo on the host system. Defaults to `repos/repo_owner/repo_name`.",
+    )
+    parser.add_argument(
         "-m",
         "--max-runs",
         help=(
@@ -248,13 +262,6 @@ def main():
     )
     parser.add_argument("-l", "--local-repo-path", help="Path to clone the remote repo.")
     args = parser.parse_args()
-    if not args.github_token:
-        raise ValueError("Please provide a GitHub authentication token either via the -t option of a .env file.")
-    if not args.local_repo_path:
-        args.local_repo_path = os.path.join("repos", args.repo_owner, args.repo_name)
-    os.makedirs(args.local_repo_path, exist_ok=True)
-    if not os.listdir(args.local_repo_path):
-        git.Repo.clone_from(f"https://github.com/{args.repo_owner}/{args.repo_name}.git", args.local_repo_path)
 
     repo_miner = RepoMiner(
         github_token=args.github_token,
