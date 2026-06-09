@@ -10,7 +10,7 @@ import os
 import re
 import zipfile
 from datetime import datetime, timedelta
-
+from functools import reduce
 
 import git
 import requests
@@ -19,37 +19,6 @@ from github import Auth, Github
 from tqdm import tqdm
 
 load_dotenv()
-
-
-def parse_test_failures(log: str) -> list[str]:
-    """
-    Parse the names of failed tests from the pytest log.
-    :param log: The pytest log content.
-    :returns: A list of the identifiers of the failed tests.
-    """
-    failed_tests = []
-    # Pytest failure pattern in logs: FAILED path/to/test.py::class_name::test_name
-    pytest_fail_regex = re.compile(r"(FAILED|ERROR|FLAKY)\s+([\w\/\._]+(::[\w_]+)?(::[\w_]+))")
-    matches = pytest_fail_regex.findall(log)
-    for m in matches:
-        if m not in failed_tests:
-            failed_tests.append(m[1])
-    return failed_tests
-
-
-def get_failed_tests_from_logs(zip_content: bytes):
-    """
-    Take the zip output and parse test failures from the log.
-    :param zip_content: The content of the zip file.
-    """
-    failed_tests = []
-
-    with zipfile.ZipFile(io.BytesIO(zip_content)) as z:
-        for filename in z.namelist():
-            with z.open(filename) as f:
-                content = f.read().decode("utf-8", errors="ignore")
-                failed_tests += parse_test_failures(content)
-    return failed_tests
 
 
 class RepoMiner:
@@ -89,34 +58,72 @@ class RepoMiner:
         self.local_repo.git.fetch()
         self.remote = Github(auth=Auth.Token(self.github_token)).get_repo(f"{self.repo_owner}/{self.repo_name}")
 
+    def get_failed_tests_from_logs(self, zip_content: bytes):
+        """
+        Take the zip output and parse test failures from the log.
+        :param zip_content: The content of the zip file.
+        """
+        failed_tests = []
+
+        with zipfile.ZipFile(io.BytesIO(zip_content)) as z:
+            for filename in z.namelist():
+                with z.open(filename) as f:
+                    content = f.read().decode("utf-8", errors="ignore")
+                    failed_tests += self.parse_test_failures(content)
+        return failed_tests
+
+    def parse_test_failures(self, log: str) -> list[str]:
+        """
+        Parse the names of failed tests from the pytest log.
+        :param log: The pytest log content.
+        :returns: A list of the identifiers of the failed tests.
+        """
+        # Pytest failure pattern in logs: FAILED path/to/test.py::class_name::test_name
+        failed_tests = [
+            match[1] for match in re.findall(r"(FAILED|ERROR|FLAKY)\s+([\w\/\._]+(::[\w_]+)?(::[\w_]+))", log)
+        ]
+
+        rootdirs = re.findall(rf"rootdir: /home/runner/work/{self.repo_name}/{self.repo_name}(/?)([\w\/\._]*)", log)
+        if rootdirs:
+            rootdir = rootdirs[0][1]
+        else:
+            rootdir = ""
+
+        # Remove duplicates
+        return reduce(
+            lambda tests, test: tests if test in tests else tests + ([f"{rootdir}/{test}"]) if rootdir else [test],
+            failed_tests,
+            [],
+        )
+
     def get_test_metadata(
         self,
+        commit_sha: str,
         test_id: str,
     ) -> dict:
         """
         Finds the commit that introduced a test.
 
+        :param commit_sha: The commit in which to search for the test. We cannot simply use the most recent commit
+                           because tests may be deleted, meaning that git can't find them.
         :param test_id: The full identifier of the test,
                         e.g. "tests/components/bang_olufsen/test_event.py::test_button_event_creation_a5".
         """
         # Find the commit that introduced the test function definition
-        try:
-            file_path, test_name = test_id.split("::")
+        file_path, test_name = test_id.split("::")
 
-            log_output = self.local_repo.git.log(
-                f"-L:{test_name}:{file_path}", "--reverse", "--format=%H", "--no-patch"
-            )
-            introduction_commit_sha = log_output.strip().split("\n")[0]
-            introduction_date = self.local_repo.commit(introduction_commit_sha).committed_datetime.isoformat()
+        self.local_repo.git.reset("--hard")
+        self.local_repo.git.fetch("origin", commit_sha)
+        self.local_repo.git.checkout(commit_sha)
 
-            return {
-                "introduced_in": introduction_commit_sha,
-                "introduction_date": introduction_date,
-            }
+        log_output = self.local_repo.git.log(f"-L:{test_name}:{file_path}", "--reverse", "--format=%H", "--no-patch")
+        introduction_commit_sha = log_output.strip().split("\n")[0]
+        introduction_date = self.local_repo.commit(introduction_commit_sha).committed_datetime.isoformat()
 
-        except git.exc.GitCommandError as e:
-            print(e)
-            return None
+        return {
+            "introduced_in": introduction_commit_sha,
+            "introduction_date": introduction_date,
+        }
 
     def get_run_metadata(self, run: dict) -> dict:
         """
@@ -139,10 +146,32 @@ class RepoMiner:
         if response.status_code == 200 and pulls.totalCount > 0:
             pr = pulls[0]
             failed_tests = {}
-            for test_id in get_failed_tests_from_logs(response.content):
-                test_metadata = self.get_test_metadata(test_id)
-                if test_metadata:
-                    failed_tests[test_id] = test_metadata
+            for test_id in self.get_failed_tests_from_logs(response.content):
+                try:
+                    test_metadata = self.get_test_metadata(pr.head.sha, test_id)
+                    if test_metadata:
+                        failed_tests[test_id] = test_metadata
+                except git.exc.GitCommandError as e:
+                    print(e)
+                    print(
+                        {
+                            "run_id": run["id"],
+                            "run_attempt": run["run_attempt"],
+                            "created_at": run["created_at"],
+                            "failed_tests": failed_tests,
+                            "pull_request": {
+                                "number": pr.number,
+                                "title": pr.title,
+                                "created_at": pr.created_at.isoformat(),
+                                # The Merge Commit created by GitHub for the CI run
+                                "merge_sha": run["head_sha"],
+                                # The Source (Feature Branch) commit
+                                "source_sha": pr.head.sha,
+                                # The Target (Base Branch, e.g., dev) commit
+                                "target_sha": pr.base.sha,
+                            },
+                        }
+                    )
 
             if failed_tests:
                 return {
@@ -186,13 +215,14 @@ class RepoMiner:
             "event": "pull_request",
             "conclusion": "success",
             "base": self.base_branch,
-            "name": self.workflow_name,
             # Github only keeps run logs for a maximum of 90 days for public repos
             "created": f">={(datetime.now() - timedelta(days=90)).strftime('%Y-%m-%d')}",
             "sort": "updated",
             "direction": "desc",
             "per_page": 100,
         }
+        if self.workflow_name:
+            params |= {"name": self.workflow_name}
         headers = {"Authorization": f"token {self.github_token}"}
 
         # Pagination loop for PRs (GitHub API returns 100 max per page)
@@ -246,7 +276,7 @@ def main():
     )
     parser.add_argument("-w", "--workflow-name", help="Name of the workflow to consider, e.g. tests.yaml.")
     parser.add_argument(
-        "-r",
+        "-l",
         "--local-repo-path",
         help="Location of the repo on the host system. Defaults to `repos/repo_owner/repo_name`.",
     )
@@ -260,7 +290,6 @@ def main():
         default=50,
         type=int,
     )
-    parser.add_argument("-l", "--local-repo-path", help="Path to clone the remote repo.")
     args = parser.parse_args()
 
     repo_miner = RepoMiner(
