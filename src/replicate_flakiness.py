@@ -85,6 +85,12 @@ def get_args() -> argparse.Namespace:
     parser.add_argument("-n", "--repo-name", help="The name of the repo.", required=True)
     parser.add_argument("-b", "--branch-name", help="The name of the branch.", required=True)
     parser.add_argument(
+        "-g",
+        "--generate-template-scripts",
+        help="Use this to generate a template dockerfile and run scripts.",
+        action="store_true",
+    )
+    parser.add_argument(
         "-O", "--output-json", help="Where to save the output. Defaults to updating the input JSON data."
     )
     parser.add_argument(
@@ -109,11 +115,92 @@ def get_args() -> argparse.Namespace:
     return args
 
 
+def generate_template_scripts(repo_owner, repo_name):
+    project_directory = os.path.join(BASE_DIR, repo_owner, repo_name)
+    os.makedirs(project_directory, exist_ok=True)
+    with open(os.path.join(project_directory, "setup.sh"), "w") as f:
+        f.write(
+            f"""#!/bin/bash
+cd {repo_name}
+git reset --hard
+git fetch origin $1
+git checkout $1
+
+# Commands to set up and install the repo
+python -m uv sync --group dev
+        """
+        )
+    with open(os.path.join(project_directory, "test.sh"), "w") as f:
+        f.write(
+            f"""#!/bin/bash
+cd {repo_name}
+.venv/bin/python -m uv run pytest $@
+
+# Check the exit code
+# Exit code 0: All tests were collected and passed successfully
+# Exit code 1: Tests were collected and run but some of the tests failed
+# Exit code 2: Test execution was interrupted by the user
+# Exit code 3: Internal error happened while executing tests
+# Exit code 4: pytest command line usage error
+# Exit code 5: No tests were collected
+
+# We want the exit code to be 0 even if tests failed, since this is expected here.
+# We only want a non-zero exit code if there is a problem running pytest itself, as this will interupt
+# the docker container.
+EXIT_CODE=$?
+if [ $EXIT_CODE -eq 0 ] || [ $EXIT_CODE -eq 1 ]; then
+    exit 0
+else
+    exit $EXIT_CODE
+fi
+        """
+        )
+    with open(os.path.join(project_directory, "Dockerfile"), "w") as f:
+        f.write(
+            f"""# You may need to change the python version
+FROM python:3.13-bookworm
+
+RUN addgroup --gid 1002 "flakehunter" && \\
+    adduser --disabled-password --gecos "FlakeFighters User,,," \\
+    --home /home/flakehunter --ingroup flakehunter --uid 1002 flakehunter
+
+# Set working directory
+WORKDIR /home/flakehunter
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \\
+    bash \\
+    git \\
+    && rm -rf /var/lib/apt/lists/*
+
+
+USER 1002:1002
+
+
+# Clone the repo and set up config with dummy details
+RUN git clone https://github.com/{repo_owner}/{repo_name}.git; \\
+    git config --global user.email "you@example.com"; \\
+    git config --global user.name "Your Name"
+
+# Install pytest and the flake-fighting plugin
+RUN pip install --no-cache-dir uv pytest pytest-flakefighters
+
+# Copy the scripts
+COPY --chown=1002:1002 setup.sh setup.sh
+COPY --chown=1002:1002 test.sh test.sh
+RUN chmod +x setup.sh test.sh
+        """
+        )
+
+
 def main():
     """
     Main entrypoint for flakiness replication.
     """
     args = get_args()
+    if args.generate_template_scripts:
+        generate_template_scripts(args.repo_owner, args.repo_name)
+        return
     with open(args.input_json) as f:
         runs = json.load(f)
     if args.run_ids:

@@ -7,7 +7,7 @@ RUN addgroup --gid 1002 "flakehunter" && \
 # Set working directory
 WORKDIR /home/flakehunter
 
-# Install system dependencies required for Home Assistant core
+# Install system dependencies
 RUN apt-get update && apt-get install -y \
     bash \
     git \
@@ -37,5 +37,3 @@ RUN pip install --no-cache-dir uv pytest pytest-flakefighters
 COPY --chown=1002:1002 setup.sh setup.sh
 COPY --chown=1002:1002 test.sh test.sh
 RUN chmod +x setup.sh test.sh
-RUN mkdir outputs && chmod 777 outputs
-# ENV PATH="$PATH:/home/flakehunter/.local/bin"

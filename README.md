@@ -10,25 +10,26 @@ Each object has the following structure:
 ```
 {
   "run_id": int,
-  "run_attempt": int > 0,
-  "created_at": "yyyy-mm-ddThh:mm:ss+hh:mm",
-  "failed_tests": [
-    {
-      "test_id": "path/to/test_file.py::test_method",
-      "introduced_in": commit_sha,
-      "introduction_date": "yyyy-mm-ddThh:mm:ss+hh:mm"
-    }
+  "run_attempt": int,
+  "created_at": "yyyy-mm-ddThh:mm:ssZ",
+  "failed_tests": {
+    "path/to/test_file.py::test_id": {
+      "introduced_in": "commit_sha",
+      "introduction_date": "yyyy-mm-ddThh:mm:ssZ",
+      "passes": int, # Number of times the test passed when attempting to reproduce flaky behaviour
+      "failures": int # Number of times the test failed when attempting to reproduce flaky behaviour
+    },
     ...
-  ],
+  },
   "pull_request": {
     "number": int,
-    "title": str,
-    "created_at": "2026-05-26T10:23:23+00:00",
-    "merge_sha": "yyyy-mm-ddThh:mm:ss+hh:mm",
-    "source_sha": commit_sha,
-    "target_sha": commit_sha
+    "title": "PR message",
+    "created_at": "yyyy-mm-ddThh:mm:ssZ",
+    "merge_sha": "commit_sha",
+    "source_sha": "commit_sha",
+    "target_sha": "commit_sha"
   }
-}
+},
 ```
 
 # Collecting Additional Data
@@ -48,9 +49,9 @@ source venv/bin/activate
 pip install .
 ```
 
-### Collecting data
+### Collecting Data
 
-To update a repo or collect data from a new repo, you can run `src/workflow-miner.py` with the following arguments.
+To update a repo or collect data from a new repo, you can run `python src/workflow-miner.py` with the following arguments.
 ```
   -h, --help            show this help message and exit
   -t GITHUB_TOKEN, --github-token GITHUB_TOKEN
@@ -78,3 +79,32 @@ python src/workflow_miner.py --repo-owner home-assistant --repo-name core --base
 
 ```
 This will create (or update) the JSON file that corresponds to the repo branch.
+
+### Replicating Flaky Behaviour
+Replicating flaky behaviour is slightly more involved than repository mining, but is still fairly straightforward.
+To maximise reproducability, we use [Docker](https://docs.docker.com/) containers to execute the flaky test candidates.
+Each repo therefore needs a Dockerfile, as well as scripts to set up the repo and run the tests.
+These are mostly boilerplate, and we have included a script to generate these for you.
+To do this, you can call
+```
+python src/replicate_flakiness.py --repo-owner $REPO_OWNER --repo-name $REPO_NAME --generate-template-scripts
+```
+This will generate three files in `data/$REPO_OWNER/$REPO_NAME`:
+- `Dockerfile` contains instructions for Docker on how to set up the container up to and including cloning the
+repository into the container.
+This should be sufficient for most needs, but you may need to add extra system dependencies to the install command.
+- `setup.sh` is a script to checkout the relevant commit and setup the repo by installing the necessary dependencies.
+It contains all of the setup that could possibly vary between commits.
+By default, this just calls `python -m uv sync --group dev` to set up a virtual environment and install the dependencies
+using `uv`.
+> [!NOTE]
+> More complex repositories such as `home-assistant/core` tend to provide their own setup scripts.
+> You should consult the README of the repo for more details.
+- `test.sh` is a script to run the flaky test cases. By default, it just uses `uv` to run `pytest` from the virtual environment.
+
+Once you have done this, you can then attempt to replicate the flaky behaviour by calling
+```
+python src/replicate_flakiness.py --repo-owner $REPO_OWNER --repo-name $REPO_NAME --branch-name $BRANCH_NAME --max-repeats 100
+```
+This will attempt to run each flaky test candidate 100 times.
+The results will overwrite the `passes` and `failures` keys for each test in `data/$REPO_OWNER/$REPO_NAME/$BRANCH_NAME.json`.

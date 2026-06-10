@@ -21,6 +21,25 @@ from tqdm import tqdm
 load_dotenv()
 
 
+def parse_test_failures(log: str) -> list[str]:
+    """
+    Parse the names of failed tests from the pytest log.
+    :param log: The pytest log content.
+    :returns: A list of the identifiers of the failed tests.
+    """
+    # Pytest failure pattern in logs: FAILED path/to/test.py::class_name::test_name
+    failed_tests = [
+        match[1] for match in re.findall(r"(FAILED|ERROR|FLAKY)\s+([\w\/\._\-]+(::[\w_]+)?(::[\w_]+))", log)
+    ]
+
+    # Remove duplicates
+    return reduce(
+        lambda tests, test: tests if test in tests else tests + [test],
+        failed_tests,
+        [],
+    )
+
+
 class RepoMiner:
     """
     Class to mine a given repo.
@@ -32,7 +51,7 @@ class RepoMiner:
         repo_owner: str,
         repo_name: str,
         base_branch: str,
-        workflow_name: str,
+        workflow_name: str = None,
         max_runs: int = 50,
         local_repo_path: str = None,
     ):
@@ -69,32 +88,20 @@ class RepoMiner:
             for filename in z.namelist():
                 with z.open(filename) as f:
                     content = f.read().decode("utf-8", errors="ignore")
-                    failed_tests += self.parse_test_failures(content)
+
+                    # Need to prepend the working directory of the workflow in case it is not the repo root
+                    # It's easier to parse this from the pytest log than it is to look it up in the workflow file
+                    rootdirs = re.findall(
+                        rf"rootdir: /home/runner/work/{self.repo_name}/{self.repo_name}(/?)([\w\/\._]*)", content
+                    )
+                    if rootdirs:
+                        rootdir = rootdirs[0][1]
+                    else:
+                        rootdir = ""
+                    failed_tests += [
+                        f"{rootdir}/{test}" if rootdir else test for test in self.parse_test_failures(content)
+                    ]
         return failed_tests
-
-    def parse_test_failures(self, log: str) -> list[str]:
-        """
-        Parse the names of failed tests from the pytest log.
-        :param log: The pytest log content.
-        :returns: A list of the identifiers of the failed tests.
-        """
-        # Pytest failure pattern in logs: FAILED path/to/test.py::class_name::test_name
-        failed_tests = [
-            match[1] for match in re.findall(r"(FAILED|ERROR|FLAKY)\s+([\w\/\._]+(::[\w_]+)?(::[\w_]+))", log)
-        ]
-
-        rootdirs = re.findall(rf"rootdir: /home/runner/work/{self.repo_name}/{self.repo_name}(/?)([\w\/\._]*)", log)
-        if rootdirs:
-            rootdir = rootdirs[0][1]
-        else:
-            rootdir = ""
-
-        # Remove duplicates
-        return reduce(
-            lambda tests, test: tests if test in tests else tests + ([f"{rootdir}/{test}"]) if rootdir else [test],
-            failed_tests,
-            [],
-        )
 
     def get_test_metadata(
         self,
@@ -153,25 +160,6 @@ class RepoMiner:
                         failed_tests[test_id] = test_metadata
                 except git.exc.GitCommandError as e:
                     print(e)
-                    print(
-                        {
-                            "run_id": run["id"],
-                            "run_attempt": run["run_attempt"],
-                            "created_at": run["created_at"],
-                            "failed_tests": failed_tests,
-                            "pull_request": {
-                                "number": pr.number,
-                                "title": pr.title,
-                                "created_at": pr.created_at.isoformat(),
-                                # The Merge Commit created by GitHub for the CI run
-                                "merge_sha": run["head_sha"],
-                                # The Source (Feature Branch) commit
-                                "source_sha": pr.head.sha,
-                                # The Target (Base Branch, e.g., dev) commit
-                                "target_sha": pr.base.sha,
-                            },
-                        }
-                    )
 
             if failed_tests:
                 return {
@@ -241,6 +229,7 @@ class RepoMiner:
             )
             print(f"  {len(viable_runs)} viable runs")
 
+            # It would be lovely to do this in parallel, but that'll get us rate-limited!
             for run in tqdm(viable_runs):
                 metadata = self.get_run_metadata(run)
                 if metadata is not None and metadata not in data:
