@@ -40,7 +40,7 @@ def parse_test_failures(log: str) -> list[str]:
     )
 
 
-class RepoMiner:
+class WorkflowMiner:
     """
     Class to mine a given repo.
     """
@@ -98,9 +98,7 @@ class RepoMiner:
                         rootdir = rootdirs[0][1]
                     else:
                         rootdir = ""
-                    failed_tests += [
-                        f"{rootdir}/{test}" if rootdir else test for test in self.parse_test_failures(content)
-                    ]
+                    failed_tests += [f"{rootdir}/{test}" if rootdir else test for test in parse_test_failures(content)]
         return failed_tests
 
     def get_test_metadata(
@@ -281,7 +279,7 @@ def main():
     )
     args = parser.parse_args()
 
-    repo_miner = RepoMiner(
+    workflow_miner = WorkflowMiner(
         github_token=args.github_token,
         repo_owner=args.repo_owner,
         repo_name=args.repo_name,
@@ -290,7 +288,7 @@ def main():
         workflow_name=args.workflow_name,
         max_runs=args.max_runs,
     )
-    repo_miner.mine_repo()
+    workflow_miner.mine_repo()
 
 
 if __name__ == "__main__":
