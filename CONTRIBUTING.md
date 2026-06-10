@@ -49,3 +49,11 @@ pre-commit install
 # Manually run hooks on all files (optional)
 pre-commit run --all-files
 ```
+
+## API Keys
+The above CI tests for this repo require a github API key to run.
+Without this, they will fail.
+The API key is stored in the repo secrets under key `GITHUB_TOKEN`.
+The key will expire from time to time.
+You should receive an email about this with instructions on how to regenerate it.
+You will then need to update the `GITHUB_TOKEN` secret.
