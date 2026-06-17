@@ -179,12 +179,15 @@ class WorkflowMiner:
                 }
         return None
 
-    def mine_repo(self):
+    def mine_repo(self, output_json: str = None):
         """
         Mine the repo for failed actions and save the result to JSON.
         """
-        output_dir = os.path.join("data", self.repo_owner, self.repo_name)
-        output_file = os.path.join(output_dir, f"{self.base_branch}.json")
+        if output_json:
+            output_dir = os.path.join("data", self.repo_owner, self.repo_name)
+            output_file = os.path.join(output_dir, f"{self.base_branch}.json")
+        else:
+            output_dir, output_file = os.path.split(output_json)
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
 
@@ -234,6 +237,12 @@ class WorkflowMiner:
                     data.append(metadata)
                     found_count += 1
 
+            # Append new data to old data if the file already exists
+            if os.path.exists(output_file):
+                with open(output_file) as f:
+                    old_data = json.load(f)
+                data = old_data + data
+
             with open(output_file, "w") as f:
                 json.dump(data, f, indent=2)
             if "next" in response.links and url:
@@ -277,7 +286,15 @@ def main():
         default=50,
         type=int,
     )
+    parser.add_argument(
+        "-O",
+        "--output-json",
+        help="Where to save the output. Defaults to `data/${repo_owner}/${repo_name}/${branch_name}.json`.",
+    )
     args = parser.parse_args()
+
+    if not args.output_json:
+        args.output_json = args.input_json
 
     workflow_miner = WorkflowMiner(
         github_token=args.github_token,
@@ -288,7 +305,7 @@ def main():
         workflow_name=args.workflow_name,
         max_runs=args.max_runs,
     )
-    workflow_miner.mine_repo()
+    workflow_miner.mine_repo(args.output_json)
 
 
 if __name__ == "__main__":

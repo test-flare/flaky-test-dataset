@@ -4,6 +4,7 @@ from multiprocessing import Pool
 import docker
 import os
 from tqdm import tqdm
+import datetime
 
 from workflow_miner import parse_test_failures
 
@@ -33,7 +34,9 @@ class FlakinessReplicator:
             raise ValueError(f"Container failed with exit code {exit_code}" + (logs if logs else "No logs captured."))
         return logs
 
-    def replicate_flakiness(self, sha: str, tests_to_check: list[str], repeats: int = 2) -> dict:
+    def replicate_flakiness(
+        self, sha: str, tests_to_check: list[str], repeats: int = 2, terminate_early: bool = False
+    ) -> dict:
         """
         Attempt to replicate the flaky behaviour of a given set of tests by repeatedly running them and looking for
         different outcomes.
@@ -63,7 +66,10 @@ class FlakinessReplicator:
                 for test in tests_to_check:
                     results[test]["failures"] += test in failed_tests
                     results[test]["passes"] += test not in failed_tests
-                if all(results[test]["failures"] and results[test]["passes"] for test in tests_to_check):
+                if (
+                    all(results[test]["failures"] and results[test]["passes"] for test in tests_to_check)
+                    and terminate_early
+                ):
                     break
             return results
         finally:
@@ -91,7 +97,17 @@ def get_args() -> argparse.Namespace:
         action="store_true",
     )
     parser.add_argument(
-        "-O", "--output-json", help="Where to save the output. Defaults to updating the input JSON data."
+        "-O",
+        "--output-json",
+        help=(
+            "Where to save the output. Defaults to `data/${repo_owner}/${repo_name}/${branch_name}-${timestamp}.json` "
+            "so as not to overwrite data."
+        ),
+    )
+    parser.add_argument(
+        "-O",
+        "--input-json",
+        help="Where to find the run data. Defaults to  `data/${repo_owner}/${repo_name}/${branch_name}.json`.",
     )
     parser.add_argument(
         "-m",
@@ -107,11 +123,32 @@ def get_args() -> argparse.Namespace:
         help="Number of threads to run in parallel. Defaults to 1 (i.e. serial).",
         default=None,
     )
+    parser.add_argument(
+        "-R",
+        "--running-total",
+        action="store_true",
+        help=(
+            "Set to add to the current recorded test run statistics rather than overwriting."
+            "For example, if a test has already passed 20 times and failed 30 times and 10 more repeats are run, "
+            "the outcomes will be added to these values if this flag is set."
+        ),
+        default=None,
+    )
+    parser.add_argument(
+        "-t",
+        "--terminate-early",
+        action="store_true",
+        help=(
+            "Terminate as soon as one passing and one failing run has been observed, otherwise run the specified "
+            "`--max-repeats` and record the outcome each time."
+        ),
+        default=None,
+    )
 
     args = parser.parse_args()
     args.input_json = os.path.join(BASE_DIR, args.repo_owner, args.repo_name, f"{args.branch_name}.json")
     if not args.output_json:
-        args.output_json = args.input_json
+        args.output_json = args.input_json.replace(".json", datetime.datetime.now().isoformat() + ".json")
     return args
 
 
@@ -218,7 +255,12 @@ def main():
             flakiness = pool.starmap(
                 flakiness_replicator.replicate_flakiness,
                 [
-                    (run["pull_request"]["source_sha"], list(run["failed_tests"]), args.max_repeats)
+                    (
+                        run["pull_request"]["source_sha"],
+                        list(run["failed_tests"]),
+                        args.max_repeats,
+                        args.terminate_early,
+                    )
                     for run in matching_runs
                 ],
             )
@@ -232,11 +274,24 @@ def main():
         for run in matching_runs:
             print(run["pull_request"]["source_sha"])
             flaky = flakiness_replicator.replicate_flakiness(
-                run["pull_request"]["source_sha"], run["failed_tests"], repeats=args.max_repeats
+                run["pull_request"]["source_sha"],
+                run["failed_tests"],
+                repeats=args.max_repeats,
+                terminate_early=args.terminate_early,
             )
-            run["failed_tests"] = {
-                test_id: metadata | flaky[test_id] for test_id, metadata in run["failed_tests"].items()
-            }
+            if args.running_total:
+                for test_id, metadata in run["failed_tests"].items():
+                    run["failed_tests"][test_id]["passed"] += metadata["passed"] + (
+                        run["failed_tests"][test_id].get("passed", 0)
+                    )
+                    run["failed_tests"][test_id]["failed"] += metadata["failed"] + (
+                        run["failed_tests"][test_id].get("failed", 0)
+                    )
+
+            else:
+                run["failed_tests"] = {
+                    test_id: metadata | flaky[test_id] for test_id, metadata in run["failed_tests"].items()
+                }
         with open(args.output_json, "w") as f:
             json.dump(runs, f, indent=2)
 
