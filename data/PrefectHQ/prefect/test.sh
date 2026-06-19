@@ -1,6 +1,6 @@
 #!/bin/bash
 cd prefect
-.venv/bin/python -m uv run pytest $@
+.venv/bin/python -m uv run pytest "$@"
 
 # Check the exit code
 # Exit code 0: All tests were collected and passed successfully
@@ -19,4 +19,3 @@ if [ $EXIT_CODE -eq 0 ] || [ $EXIT_CODE -eq 1 ]; then
 else
     exit $EXIT_CODE
 fi
-        

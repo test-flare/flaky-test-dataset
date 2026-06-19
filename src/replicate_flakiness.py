@@ -6,7 +6,7 @@ import os
 from tqdm import tqdm
 import datetime
 
-from workflow_miner import parse_test_failures
+from workflow_miner import parse_failure_logs
 
 BASE_DIR = "data"
 
@@ -43,6 +43,8 @@ class FlakinessReplicator:
         :param sha: The git sha of the commit to observe.
         :param tests_to_check: The pytest IDs of the tests to run.
         :param repeats: The maximum number of times to execute each test.
+        :param terminate_early: Terminate repeated test execution as soon as one pass and one failure have been
+                                observed.
         :return: Dictionary of the number of `passes` and `failures` for each test case.
         """
         client = docker.from_env()
@@ -53,7 +55,7 @@ class FlakinessReplicator:
         )
         container = client.containers.run(image, entrypoint="bash", detach=True, tty=True)
 
-        results = {test: {"passes": 0, "failures": 0} for test in tests_to_check}
+        results = {test: {"passes": 0, "failures": 0, "failure_logs": []} for test in tests_to_check}
 
         try:
             logs = self.run_command(container, f"sh ./setup.sh {sha}")
@@ -62,10 +64,16 @@ class FlakinessReplicator:
             for _ in tqdm(range(repeats)):
                 logs = self.run_command(container, f"bash ./test.sh {' '.join(tests_to_check)}")
 
-                failed_tests = parse_test_failures(logs)
+                failed_tests = parse_failure_logs(logs)
+                with open("/tmp/failurelog.txt", "w") as f:
+                    f.write(logs)
                 for test in tests_to_check:
                     results[test]["failures"] += test in failed_tests
                     results[test]["passes"] += test not in failed_tests
+                    print()
+                    print("FAILED_TESTS", test)
+                    print(failed_tests)
+                    results[test]["failure_logs"].append(failed_tests.get(test, {}).get("github_log", ""))
                 if (
                     all(results[test]["failures"] and results[test]["passes"] for test in tests_to_check)
                     and terminate_early
@@ -105,7 +113,7 @@ def get_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "-O",
+        "-I",
         "--input-json",
         help="Where to find the run data. Defaults to  `data/${repo_owner}/${repo_name}/${branch_name}.json`.",
     )
@@ -135,7 +143,7 @@ def get_args() -> argparse.Namespace:
         default=None,
     )
     parser.add_argument(
-        "-t",
+        "-T",
         "--terminate-early",
         action="store_true",
         help=(
@@ -146,7 +154,8 @@ def get_args() -> argparse.Namespace:
     )
 
     args = parser.parse_args()
-    args.input_json = os.path.join(BASE_DIR, args.repo_owner, args.repo_name, f"{args.branch_name}.json")
+    if not args.input_json:
+        args.input_json = os.path.join(BASE_DIR, args.repo_owner, args.repo_name, f"{args.branch_name}.json")
     if not args.output_json:
         args.output_json = args.input_json.replace(".json", datetime.datetime.now().isoformat() + ".json")
     return args
@@ -171,7 +180,7 @@ python -m uv sync --group dev
         f.write(
             f"""#!/bin/bash
 cd {repo_name}
-.venv/bin/python -m uv run pytest $@
+.venv/bin/python -m uv run pytest "$@"
 
 # Check the exit code
 # Exit code 0: All tests were collected and passed successfully

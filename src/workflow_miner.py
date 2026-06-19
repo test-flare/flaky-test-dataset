@@ -20,6 +20,13 @@ from tqdm import tqdm
 
 load_dotenv()
 
+FAILURES_START_RE = re.compile(".*===+ FAILURES ===+.*")
+CAPTURED_STD_LOG_CALL_RE = re.compile(r".*---+ Captured (std(err|out)|log) \w+ ---+.*")
+WARNINGS_SUMMARY_RE = re.compile(".*===+ warnings summary ===+.*")
+SHORT_TEST_SUMMARY_INFO_RE = re.compile(".*===+ short test summary info ===+.*")
+IMAGE_RE = re.compile(r".*Image: ([\w\-]+)")
+VERSION_RE = re.compile(r".*Version: ([\w\-\.]+)")
+
 
 def parse_test_failures(log: str) -> list[str]:
     """
@@ -29,7 +36,7 @@ def parse_test_failures(log: str) -> list[str]:
     """
     # Pytest failure pattern in logs: FAILED path/to/test.py::class_name::test_name
     failed_tests = [
-        match[1] for match in re.findall(r"(FAILED|ERROR|FLAKY)\s+([\w\/\._\-]+(::[\w_]+)?(::[\w_]+))", log)
+        match[1] for match in re.findall(r"(FAILED|FLAKY)\s+([\w\/\.\-]+(::[\w]+)?(::[\w]+)(\[[\w\-\s]+\])?)", log)
     ]
 
     # Remove duplicates
@@ -38,6 +45,64 @@ def parse_test_failures(log: str) -> list[str]:
         failed_tests,
         [],
     )
+
+
+def parse_failure_logs(log: str, rootdir: str = "", log_file: str = "") -> dict[str, str]:
+    """
+    Given a pytest log, parse the test failure logs.
+    :param log: The pytest log in its entirity.
+    :param rootdir: The root directory.
+    :param log_file: The name of the log file containing `log`.
+                     This facilitates quick manual inspection of the git logs if necessary.
+    :returns: Dictionary mapping test identifiers to their failure logs.
+    """
+    scanning_failure_logs = False
+    current_test = None
+    image = None
+    version = None
+    failure_log_buffer = []
+
+    failures = {test_id: {} for test_id in parse_test_failures(log)}
+    test_paths = dict(reversed(test_id.split("::", 1)) for test_id in failures)
+
+    if test_paths:
+        failed_test_start_re = re.compile(rf".*_+ ({'|'.join(map(re.escape, test_paths))}) _+.*")
+
+        for line in log.split("\n"):
+            # Start scanning when we hit the FAILURES section
+            if FAILURES_START_RE.match(line):
+                scanning_failure_logs = True
+            elif IMAGE_RE.match(line):
+                image = IMAGE_RE.match(line).group(1)
+            elif VERSION_RE.match(line):
+                version = VERSION_RE.match(line).group(1)
+            elif scanning_failure_logs:
+                failed_test_start = failed_test_start_re.match(line)
+                if failed_test_start and current_test is None:
+                    current_test = failed_test_start.group(1)
+                elif current_test and (
+                    WARNINGS_SUMMARY_RE.match(line)
+                    or SHORT_TEST_SUMMARY_INFO_RE.match(line)
+                    or CAPTURED_STD_LOG_CALL_RE.match(line)
+                ):
+                    test_path = test_paths.get(current_test)
+                    if test_path:
+                        failures[f"{test_path}::{current_test}"] = {
+                            "image": image,
+                            "version": version,
+                            "github_log": "".join(failure_log_buffer),
+                        }
+                        if log_file:
+                            failures[f"{test_path}::{current_test}"]["log_file"] = log_file
+                    current_test = None
+                    failure_log_buffer = []
+                elif current_test:
+                    failure_log_buffer.append(line)
+                else:
+                    continue
+    if rootdir:
+        return {f"{rootdir}/{test}": metadata for test, metadata in failures.items()}
+    return failures
 
 
 class WorkflowMiner:
@@ -77,12 +142,14 @@ class WorkflowMiner:
         self.local_repo.git.fetch()
         self.remote = Github(auth=Auth.Token(self.github_token)).get_repo(f"{self.repo_owner}/{self.repo_name}")
 
-    def get_failed_tests_from_logs(self, zip_content: bytes):
+    def get_failed_tests_from_logs(self, zip_content: bytes) -> dict[str, dict[str, str]]:
         """
         Take the zip output and parse test failures from the log.
         :param zip_content: The content of the zip file.
+        :returns: Dictionary mapping test identifiers to their failure logs (if they exist and can be parsed) and
+                  containing log file.
         """
-        failed_tests = []
+        failed_tests = {}
 
         with zipfile.ZipFile(io.BytesIO(zip_content)) as z:
             for filename in z.namelist():
@@ -94,11 +161,9 @@ class WorkflowMiner:
                     rootdirs = re.findall(
                         rf"rootdir: /home/runner/work/{self.repo_name}/{self.repo_name}(/?)([\w\/\._]*)", content
                     )
-                    if rootdirs:
-                        rootdir = rootdirs[0][1]
-                    else:
-                        rootdir = ""
-                    failed_tests += [f"{rootdir}/{test}" if rootdir else test for test in parse_test_failures(content)]
+                    failed_tests |= parse_failure_logs(
+                        content, rootdir=rootdirs[0][1] if rootdirs else "", log_file=filename
+                    )
         return failed_tests
 
     def get_test_metadata(
@@ -116,6 +181,8 @@ class WorkflowMiner:
         """
         # Find the commit that introduced the test function definition
         file_path, test_name = test_id.split("::")
+        # Remove parameterisation info, e.g. test_preinfusion[Linea Micra] -> test_preinfusion
+        test_name = test_name.split("[")[0]
 
         self.local_repo.git.reset("--hard")
         self.local_repo.git.fetch("origin", commit_sha)
@@ -151,49 +218,54 @@ class WorkflowMiner:
         if response.status_code == 200 and pulls.totalCount > 0:
             pr = pulls[0]
             failed_tests = {}
-            for test_id in self.get_failed_tests_from_logs(response.content):
-                try:
-                    test_metadata = self.get_test_metadata(pr.head.sha, test_id)
-                    if test_metadata:
-                        failed_tests[test_id] = test_metadata
-                except git.exc.GitCommandError as e:
-                    print(e)
+            failure_details = self.get_failed_tests_from_logs(response.content).items()
+            # If we've got more than 10 failing tests, chances are something fundamental has gone wrong with the build
+            # and we're not observing flaky behaviour.
+            # Getting the test metadata will also be very slow for more than a few tests since it has to check out the
+            # commit and get the git log.
+            if len(failure_details) < 10:
+                for test_id, test_metadata in failure_details:
+                    try:
+                        test_metadata |= self.get_test_metadata(pr.head.sha, test_id)
+                        if test_metadata:
+                            failed_tests[test_id] = test_metadata
+                    except git.exc.GitCommandError as e:
+                        print(e)
 
-            if failed_tests:
-                return {
-                    "run_id": run["id"],
-                    "run_attempt": run["run_attempt"],
-                    "created_at": run["created_at"],
-                    "failed_tests": failed_tests,
-                    "pull_request": {
-                        "number": pr.number,
-                        "title": pr.title,
-                        "created_at": pr.created_at.isoformat(),
-                        # The Merge Commit created by GitHub for the CI run
-                        "merge_sha": run["head_sha"],
-                        # The Source (Feature Branch) commit
-                        "source_sha": pr.head.sha,
-                        # The Target (Base Branch, e.g., dev) commit
-                        "target_sha": pr.base.sha,
-                    },
-                }
+                if failed_tests:
+                    return {
+                        "run_id": run["id"],
+                        "run_attempt": run["run_attempt"],
+                        "created_at": run["created_at"],
+                        "failed_tests": failed_tests,
+                        "pull_request": {
+                            "number": pr.number,
+                            "title": pr.title,
+                            "created_at": pr.created_at.isoformat(),
+                            # The Merge Commit created by GitHub for the CI run
+                            "merge_sha": run["head_sha"],
+                            # The Source (Feature Branch) commit
+                            "source_sha": pr.head.sha,
+                            # The Target (Base Branch, e.g., dev) commit
+                            "target_sha": pr.base.sha,
+                        },
+                    }
         return None
 
-    def mine_repo(self, output_json: str = None):
+    def mine_repo(self, output_file: str):
         """
         Mine the repo for failed actions and save the result to JSON.
+        :param output_file: Where to save the results.
         """
-        if output_json:
-            output_dir = os.path.join("data", self.repo_owner, self.repo_name)
-            output_file = os.path.join(output_dir, f"{self.base_branch}.json")
-        else:
-            output_dir, output_file = os.path.split(output_json)
-        if not os.path.exists(output_dir):
-            os.makedirs(output_dir)
 
         found_count = 0
 
-        data = []
+        # Append new data to old data if the file already exists
+        if os.path.exists(output_file):
+            with open(output_file) as f:
+                data = json.load(f)
+        else:
+            data = []
         if os.path.exists(output_file):
             with open(output_file) as f:
                 data = json.load(f)
@@ -236,12 +308,6 @@ class WorkflowMiner:
                 if metadata is not None and metadata not in data:
                     data.append(metadata)
                     found_count += 1
-
-            # Append new data to old data if the file already exists
-            if os.path.exists(output_file):
-                with open(output_file) as f:
-                    old_data = json.load(f)
-                data = old_data + data
 
             with open(output_file, "w") as f:
                 json.dump(data, f, indent=2)
@@ -294,7 +360,10 @@ def main():
     args = parser.parse_args()
 
     if not args.output_json:
-        args.output_json = args.input_json
+        output_dir = os.path.join("data", args.repo_owner, args.repo_name)
+        output_file = os.path.join(output_dir, f"{args.base_branch}.json")
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
 
     workflow_miner = WorkflowMiner(
         github_token=args.github_token,
