@@ -70,10 +70,8 @@ class FlakinessReplicator:
                 for test in tests_to_check:
                     results[test]["failures"] += test in failed_tests
                     results[test]["passes"] += test not in failed_tests
-                    print()
-                    print("FAILED_TESTS", test)
-                    print(failed_tests)
-                    results[test]["failure_logs"].append(failed_tests.get(test, {}).get("github_log", ""))
+                    if test in failed_tests:
+                        results[test]["failure_logs"].append(failed_tests.get(test, {}).get("github_log", ""))
                 if (
                     all(results[test]["failures"] and results[test]["passes"] for test in tests_to_check)
                     and terminate_early
