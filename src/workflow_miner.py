@@ -180,7 +180,9 @@ class WorkflowMiner:
                         e.g. "tests/components/bang_olufsen/test_event.py::test_button_event_creation_a5".
         """
         # Find the commit that introduced the test function definition
-        file_path, test_name = test_id.split("::")
+        split_id = test_id.split("::")
+        file_path = split_id[0]
+        test_name = split_id[-1]
         # Remove parameterisation info, e.g. test_preinfusion[Linea Micra] -> test_preinfusion
         test_name = test_name.split("[")[0]
 
