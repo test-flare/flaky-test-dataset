@@ -361,7 +361,7 @@ def main():
 
     if not args.output_json:
         output_dir = os.path.join("data", args.repo_owner, args.repo_name)
-        output_file = os.path.join(output_dir, f"{args.base_branch}.json")
+        args.output_json = os.path.join(output_dir, f"{args.base_branch}.json")
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
 
