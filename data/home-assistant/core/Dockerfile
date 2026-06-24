@@ -35,5 +35,6 @@ RUN pip install --no-cache-dir uv pytest pytest-flakefighters
 
 # Copy the scripts
 COPY --chown=1002:1002 setup.sh setup.sh
+COPY --chown=1002:1002 fix_dependencies.py fix_dependencies.py
 COPY --chown=1002:1002 test.sh test.sh
 RUN chmod +x setup.sh test.sh

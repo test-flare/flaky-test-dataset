@@ -5,6 +5,7 @@ import docker
 import os
 from tqdm import tqdm
 import datetime
+import time
 
 from workflow_miner import parse_failure_logs
 
@@ -31,11 +32,15 @@ class FlakinessReplicator:
         logs = logs.decode("utf-8")
 
         if exit_code != 0:
-            raise ValueError(f"Container failed with exit code {exit_code}" + (logs if logs else "No logs captured."))
+            raise ValueError(
+                f"Container failed with exit code {exit_code}"
+                + (logs if logs else "No logs captured.")
+                + f"Command: {command}"
+            )
         return logs
 
     def replicate_flakiness(
-        self, sha: str, tests_to_check: list[str], repeats: int = 2, terminate_early: bool = False
+        self, sha: str, tests_to_check: list[str], repeats: int = 2, terminate_early: bool = False, verbose=False
     ) -> dict:
         """
         Attempt to replicate the flaky behaviour of a given set of tests by repeatedly running them and looking for
@@ -55,14 +60,18 @@ class FlakinessReplicator:
         )
         container = client.containers.run(image, entrypoint="bash", detach=True, tty=True)
 
-        results = {test: {"passes": 0, "failures": 0, "failure_logs": []} for test in tests_to_check}
+        results = {test: {"passes": 0, "failures": 0, "failure_logs": [], "run_time": []} for test in tests_to_check}
 
         try:
             logs = self.run_command(container, f"sh ./setup.sh {sha}")
-            print(logs)
+            if verbose:
+                print(logs)
 
             for _ in tqdm(range(repeats)):
+
+                start_time = time.time()
                 logs = self.run_command(container, f"bash ./test.sh {' '.join(tests_to_check)}")
+                end_time = time.time()
 
                 failed_tests = parse_failure_logs(logs)
                 with open("/tmp/failurelog.txt", "w") as f:
@@ -70,6 +79,7 @@ class FlakinessReplicator:
                 for test in tests_to_check:
                     results[test]["failures"] += test in failed_tests
                     results[test]["passes"] += test not in failed_tests
+                    results[test]["run_time"].append(end_time - start_time)
                     if test in failed_tests:
                         results[test]["failure_logs"].append(failed_tests.get(test, {}).get("github_log", ""))
                 if (
@@ -149,6 +159,19 @@ def get_args() -> argparse.Namespace:
             "`--max-repeats` and record the outcome each time."
         ),
         default=None,
+    )
+    parser.add_argument(
+        "--flakefighters",
+        action="store_true",
+        help="Set this flag to run pytest with the flakefighers plugin.",
+        default=False,
+    )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Set this flag to print verbose logs.",
+        default=False,
     )
 
     args = parser.parse_args()
@@ -267,6 +290,7 @@ def main():
                         list(run["failed_tests"]),
                         args.max_repeats,
                         args.terminate_early,
+                        args.verbose,
                     )
                     for run in matching_runs
                 ],
@@ -285,6 +309,7 @@ def main():
                 run["failed_tests"],
                 repeats=args.max_repeats,
                 terminate_early=args.terminate_early,
+                verbose=args.verbose,
             )
             if args.running_total:
                 for test_id, metadata in run["failed_tests"].items():
