@@ -1,8 +1,6 @@
 #!/bin/bash
 cd core
-.venv/bin/python -m uv run pytest "$@"
-
-echo "ARGS $@"
+.venv/bin/pytest "$@"
 
 # Check the exit code
 # Exit code 0: All tests were collected and passed successfully
