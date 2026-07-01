@@ -1,12 +1,10 @@
 import json
 import argparse
-from multiprocessing import Pool
 import docker
 import os
 from tqdm import tqdm
 import datetime
 import time
-
 from workflow_miner import parse_failure_logs
 
 BASE_DIR = "data"
@@ -40,7 +38,13 @@ class FlakinessReplicator:
         return logs
 
     def replicate_flakiness(
-        self, sha: str, tests_to_check: list[str], repeats: int = 2, terminate_early: bool = False, verbose=False
+        self,
+        sha: str,
+        tests_to_check: list[str],
+        repeats: int = 2,
+        terminate_early: bool = False,
+        pytest_args: str = "",
+        verbose=False,
     ) -> dict:
         """
         Attempt to replicate the flaky behaviour of a given set of tests by repeatedly running them and looking for
@@ -50,28 +54,45 @@ class FlakinessReplicator:
         :param repeats: The maximum number of times to execute each test.
         :param terminate_early: Terminate repeated test execution as soon as one pass and one failure have been
                                 observed.
+        :param pytest_args: String of commandline arguments to pass directly through to pytest in the docker container.
+        :param verbose: Whether to print the full logs of the docker commands.
         :return: Dictionary of the number of `passes` and `failures` for each test case.
         """
+
+        if "--flakefighters" in pytest_args:
+            db_dir, db_file = os.path.split(f"outputs/{'|'.join(tests_to_check)}.db")
+            os.makedirs(db_dir, exist_ok=True)
+            pytest_args += " " f"--database-url sqlite:////home/flakehunter/{db_dir}/{db_file}"
+
         client = docker.from_env()
         image, _ = client.images.build(
             path=os.path.join(BASE_DIR, self.repo_owner, self.repo_name),
-            # tag=f"{self.repo_owner.lower()}:{self.repo_name.lower()}",
             rm=True,  # Remove intermediate containers after a successful build
+            buildargs={"UID": str(os.getuid()), "GID": str(os.getuid())},
         )
-        container = client.containers.run(image, entrypoint="bash", detach=True, tty=True)
+        container = client.containers.run(
+            image,
+            entrypoint="bash",
+            detach=True,
+            tty=True,
+            volumes={os.path.join(os.getcwd(), "outputs"): {"bind": "/home/flakehunter/outputs", "mode": "rw"}},
+        )
 
         results = {test: {"passes": 0, "failures": 0, "failure_logs": [], "run_time": []} for test in tests_to_check}
 
         try:
-            logs = self.run_command(container, f"sh ./setup.sh {sha}")
+            logs = self.run_command(container, f"bash ./setup.sh {sha}")
             if verbose:
                 print(logs)
 
             for _ in tqdm(range(repeats)):
 
                 start_time = time.time()
-                logs = self.run_command(container, f"bash ./test.sh {' '.join(tests_to_check)}")
+                logs = self.run_command(container, f"bash ./test.sh {pytest_args} {' '.join(tests_to_check)}")
                 end_time = time.time()
+
+                if verbose:
+                    print(logs)
 
                 failed_tests = parse_failure_logs(logs)
                 with open("/tmp/failurelog.txt", "w") as f:
@@ -133,13 +154,6 @@ def get_args() -> argparse.Namespace:
         help="Maximum number of repeats to run when looking for flaky behaviour.",
     )
     parser.add_argument(
-        "-t",
-        "--threads",
-        type=int,
-        help="Number of threads to run in parallel. Defaults to 1 (i.e. serial).",
-        default=None,
-    )
-    parser.add_argument(
         "-R",
         "--running-total",
         action="store_true",
@@ -161,16 +175,25 @@ def get_args() -> argparse.Namespace:
         default=None,
     )
     parser.add_argument(
-        "--flakefighters",
-        action="store_true",
-        help="Set this flag to run pytest with the flakefighers plugin.",
-        default=False,
+        "--pytest-args",
+        help=(
+            "Extra arguments to pass through to the `test.sh` script on the docker container, "
+            "which in turn should be passed directly to `pytest`. "
+            'NOTE: You will need to wrap this in quotes and put a space after, e.g. "--flakefighters "'
+        ),
+        default="",
     )
     parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
         help="Set this flag to print verbose logs.",
+        default=False,
+    )
+    parser.add_argument(
+        "--source-sha",
+        action="store_true",
+        help="Set this flag to use the source sha rather than the target sha associated with a run.",
         default=False,
     )
 
@@ -243,6 +266,7 @@ RUN apt-get update && apt-get install -y \\
 
 USER 1002:1002
 
+RUN mkdir outputs
 
 # Clone the repo and set up config with dummy details
 RUN git clone https://github.com/{repo_owner}/{repo_name}.git; \\
@@ -258,6 +282,10 @@ COPY --chown=1002:1002 test.sh test.sh
 RUN chmod +x setup.sh test.sh
         """
         )
+
+
+def call_with_kwargs(function, kwargs):
+    return function(**kwargs)
 
 
 def main():
@@ -280,52 +308,30 @@ def main():
 
     flakiness_replicator = FlakinessReplicator(repo_owner=args.repo_owner, repo_name=args.repo_name)
 
-    if args.threads is not None:
-        with Pool(args.threads) as pool:
-            flakiness = pool.starmap(
-                flakiness_replicator.replicate_flakiness,
-                [
-                    (
-                        run["pull_request"]["source_sha"],
-                        list(run["failed_tests"]),
-                        args.max_repeats,
-                        args.terminate_early,
-                        args.verbose,
-                    )
-                    for run in matching_runs
-                ],
-            )
-        for run, flaky in zip(matching_runs, flakiness):
+    for run in matching_runs:
+        flaky = flakiness_replicator.replicate_flakiness(
+            sha=run["pull_request"]["source_sha" if args.source_sha else "target_sha"],
+            tests_to_check=list(run["failed_tests"]),
+            repeats=args.max_repeats,
+            terminate_early=args.terminate_early,
+            verbose=args.verbose,
+            pytest_args=args.pytest_args,
+        )
+        if args.running_total:
+            for test_id, metadata in run["failed_tests"].items():
+                run["failed_tests"][test_id]["passed"] += metadata["passed"] + (
+                    run["failed_tests"][test_id].get("passed", 0)
+                )
+                run["failed_tests"][test_id]["failed"] += metadata["failed"] + (
+                    run["failed_tests"][test_id].get("failed", 0)
+                )
+
+        else:
             run["failed_tests"] = {
                 test_id: metadata | flaky[test_id] for test_id, metadata in run["failed_tests"].items()
             }
-        with open(args.output_json, "w") as f:
-            json.dump(runs, f, indent=2)
-    else:
-        for run in matching_runs:
-            print(run["pull_request"]["source_sha"])
-            flaky = flakiness_replicator.replicate_flakiness(
-                run["pull_request"]["source_sha"],
-                run["failed_tests"],
-                repeats=args.max_repeats,
-                terminate_early=args.terminate_early,
-                verbose=args.verbose,
-            )
-            if args.running_total:
-                for test_id, metadata in run["failed_tests"].items():
-                    run["failed_tests"][test_id]["passed"] += metadata["passed"] + (
-                        run["failed_tests"][test_id].get("passed", 0)
-                    )
-                    run["failed_tests"][test_id]["failed"] += metadata["failed"] + (
-                        run["failed_tests"][test_id].get("failed", 0)
-                    )
-
-            else:
-                run["failed_tests"] = {
-                    test_id: metadata | flaky[test_id] for test_id, metadata in run["failed_tests"].items()
-                }
-        with open(args.output_json, "w") as f:
-            json.dump(runs, f, indent=2)
+    with open(args.output_json, "w") as f:
+        json.dump(runs, f, indent=2)
 
 
 if __name__ == "__main__":

@@ -1,11 +1,15 @@
 FROM python:3.14-bookworm
 
-RUN addgroup --gid 1002 "flakehunter" && \
+ARG GID=1002
+ARG UID=1002
+
+RUN addgroup --gid ${GID} "flakehunter" && \
     adduser --disabled-password --gecos "FlakeFighters User,,," \
-    --home /home/flakehunter --ingroup flakehunter --uid 1002 flakehunter
+    --home /home/flakehunter --ingroup flakehunter --uid ${UID} flakehunter
 
 # Set working directory
 WORKDIR /home/flakehunter
+
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
@@ -22,8 +26,9 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 
-USER 1002:1002
+USER ${GID}:${UID}
 
+RUN mkdir outputs
 
 # Clone the repo and set up config with dummy details
 RUN git clone https://github.com/home-assistant/core.git; \
@@ -31,10 +36,10 @@ RUN git clone https://github.com/home-assistant/core.git; \
     git config --global user.name "Your Name"
 
 # Install pytest and the flake-fighting plugin
-RUN pip install --no-cache-dir uv pytest pytest-flakefighters
+RUN pip install --no-cache-dir uv
 
 # Copy the scripts
-COPY --chown=1002:1002 setup.sh setup.sh
-COPY --chown=1002:1002 fix_dependencies.py fix_dependencies.py
-COPY --chown=1002:1002 test.sh test.sh
+COPY --chown=${GID}:${UID} setup.sh setup.sh
+COPY --chown=${GID}:${UID} fix_dependencies.py fix_dependencies.py
+COPY --chown=${GID}:${UID} test.sh test.sh
 RUN chmod +x setup.sh test.sh
