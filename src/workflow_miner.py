@@ -8,18 +8,24 @@ import io
 import json
 import os
 import re
-import tomllib
 import zipfile
 from datetime import datetime, timedelta
-from tempfile import TemporaryDirectory
+from functools import reduce
 
 import git
 import requests
 from dotenv import load_dotenv
-from github import Auth, Github, Repository
+from github import Auth, Github
 from tqdm import tqdm
 
 load_dotenv()
+
+FAILURES_START_RE = re.compile(".*===+ FAILURES ===+.*")
+CAPTURED_STD_LOG_CALL_RE = re.compile(r".*---+ Captured (std(err|out)|log) \w+ ---+.*")
+WARNINGS_SUMMARY_RE = re.compile(".*===+ warnings summary ===+.*")
+SHORT_TEST_SUMMARY_INFO_RE = re.compile(".*===+ short test summary info ===+.*")
+IMAGE_RE = re.compile(r".*Image: ([\w\-]+)")
+VERSION_RE = re.compile(r".*Version: ([\w\-\.]+)")
 
 
 def parse_test_failures(log: str) -> list[str]:
@@ -28,32 +34,78 @@ def parse_test_failures(log: str) -> list[str]:
     :param log: The pytest log content.
     :returns: A list of the identifiers of the failed tests.
     """
-    failed_tests = []
     # Pytest failure pattern in logs: FAILED path/to/test.py::class_name::test_name
-    pytest_fail_regex = re.compile(r"(FAILED|ERROR|FLAKY)\s+([\w\/\._]+(::[\w_]+)?(::[\w_]+))")
-    matches = pytest_fail_regex.findall(log)
-    for m in matches:
-        if m not in failed_tests:
-            failed_tests.append(m[1])
-    return failed_tests
+    failed_tests = [
+        match[1] for match in re.findall(r"(FAILED|FLAKY)\s+([\w\/\.\-]+(::[\w]+)?(::[\w]+)(\[[\w\-\s]+\])?)", log)
+    ]
+
+    # Remove duplicates
+    return reduce(
+        lambda tests, test: tests if test in tests else tests + [test],
+        failed_tests,
+        [],
+    )
 
 
-def get_failed_tests_from_logs(zip_content: str):
+def parse_failure_logs(log: str, rootdir: str = "", log_file: str = "") -> dict[str, str]:
     """
-    Take the zip output and parse test failures from the log.
-    :param zip_content: The content of the zip file.
+    Given a pytest log, parse the test failure logs.
+    :param log: The pytest log in its entirity.
+    :param rootdir: The root directory.
+    :param log_file: The name of the log file containing `log`.
+                     This facilitates quick manual inspection of the git logs if necessary.
+    :returns: Dictionary mapping test identifiers to their failure logs.
     """
-    failed_tests = []
+    scanning_failure_logs = False
+    current_test = None
+    image = None
+    version = None
+    failure_log_buffer = []
 
-    with zipfile.ZipFile(io.BytesIO(zip_content)) as z:
-        for filename in z.namelist():
-            with z.open(filename) as f:
-                content = f.read().decode("utf-8", errors="ignore")
-                failed_tests += parse_test_failures(content)
-    return failed_tests
+    failures = {test_id: {} for test_id in parse_test_failures(log)}
+    test_paths = dict(reversed(test_id.split("::", 1)) for test_id in failures)
+
+    if test_paths:
+        failed_test_start_re = re.compile(rf".*_+ ({'|'.join(map(re.escape, test_paths))}) _+.*")
+
+        for line in log.split("\n"):
+            # Start scanning when we hit the FAILURES section
+            if FAILURES_START_RE.match(line):
+                scanning_failure_logs = True
+            elif IMAGE_RE.match(line):
+                image = IMAGE_RE.match(line).group(1)
+            elif VERSION_RE.match(line):
+                version = VERSION_RE.match(line).group(1)
+            elif scanning_failure_logs:
+                failed_test_start = failed_test_start_re.match(line)
+                if failed_test_start and current_test is None:
+                    current_test = failed_test_start.group(1)
+                elif current_test and (
+                    WARNINGS_SUMMARY_RE.match(line)
+                    or SHORT_TEST_SUMMARY_INFO_RE.match(line)
+                    or CAPTURED_STD_LOG_CALL_RE.match(line)
+                ):
+                    test_path = test_paths.get(current_test)
+                    if test_path:
+                        failures[f"{test_path}::{current_test}"] = {
+                            "image": image,
+                            "version": version,
+                            "github_log": "".join(failure_log_buffer),
+                        }
+                        if log_file:
+                            failures[f"{test_path}::{current_test}"]["log_file"] = log_file
+                    current_test = None
+                    failure_log_buffer = []
+                elif current_test:
+                    failure_log_buffer.append(line)
+                else:
+                    continue
+    if rootdir:
+        return {f"{rootdir}/{test}": metadata for test, metadata in failures.items()}
+    return failures
 
 
-class RepoMiner:
+class WorkflowMiner:
     """
     Class to mine a given repo.
     """
@@ -63,69 +115,94 @@ class RepoMiner:
         github_token: str,
         repo_owner: str,
         repo_name: str,
-        local_repo_path: str,
         base_branch: str,
-        workflow_name: str,
+        workflow_name: str = None,
         max_runs: int = 50,
+        local_repo_path: str = None,
     ):
         self.github_token = github_token
         self.repo_owner = repo_owner
         self.repo_name = repo_name
-        self.local_repo = git.Repo(local_repo_path)
         self.base_branch = base_branch
         self.workflow_name = workflow_name
         self.max_runs = max_runs
 
+        if local_repo_path is None:
+            local_repo_path = os.path.join("repos", self.repo_owner, self.repo_name)
+            os.makedirs(local_repo_path, exist_ok=True)
+        # If the directory is not empty, assume the repo is already cloned and ready to go
+        if os.listdir(local_repo_path):
+            self.local_repo = git.Repo(local_repo_path)
+        else:
+            self.local_repo = git.Repo.clone_from(
+                f"https://github.com/{self.repo_owner}/{self.repo_name}.git", local_repo_path
+            )
+
         self.local_repo.git.checkout(self.base_branch)
         self.local_repo.git.fetch()
+        self.remote = Github(auth=Auth.Token(self.github_token)).get_repo(f"{self.repo_owner}/{self.repo_name}")
 
-    def requires_python(self, sha: str):
+    def get_failed_tests_from_logs(self, zip_content: bytes) -> dict[str, dict[str, str]]:
         """
-        Returns the required python version string (if found) for a given commit sha.
-        :param sha: The commit sha.
+        Take the zip output and parse test failures from the log.
+        :param zip_content: The content of the zip file.
+        :returns: Dictionary mapping test identifiers to their failure logs (if they exist and can be parsed) and
+                  containing log file.
         """
+        failed_tests = {}
 
-        with TemporaryDirectory() as worktree_path:
-            self.local_repo.git.worktree("add", worktree_path, sha)
-            if os.path.exists(f"{worktree_path}/.python_version"):
-                with open(f"{worktree_path}/.python_version") as f:
-                    return "\n".join(f.readlines()).strip()
-            if os.path.exists(f"{worktree_path}/pyproject.toml"):
-                with open(f"{worktree_path}/pyproject.toml", "rb") as f:
-                    return tomllib.load(f).get("project", {}).get("requires-python", "")
-        return ""
+        with zipfile.ZipFile(io.BytesIO(zip_content)) as z:
+            for filename in z.namelist():
+                with z.open(filename) as f:
+                    content = f.read().decode("utf-8", errors="ignore")
 
-    def get_test_metadata(self, test_id: str) -> dict:
+                    # Need to prepend the working directory of the workflow in case it is not the repo root
+                    # It's easier to parse this from the pytest log than it is to look it up in the workflow file
+                    rootdirs = re.findall(
+                        rf"rootdir: /home/runner/work/{self.repo_name}/{self.repo_name}(/?)([\w\/\._]*)", content
+                    )
+                    failed_tests |= parse_failure_logs(
+                        content, rootdir=rootdirs[0][1] if rootdirs else "", log_file=filename
+                    )
+        return failed_tests
+
+    def get_test_metadata(
+        self,
+        commit_sha: str,
+        test_id: str,
+    ) -> dict:
         """
         Finds the commit that introduced a test.
 
+        :param commit_sha: The commit in which to search for the test. We cannot simply use the most recent commit
+                           because tests may be deleted, meaning that git can't find them.
         :param test_id: The full identifier of the test,
                         e.g. "tests/components/bang_olufsen/test_event.py::test_button_event_creation_a5".
         """
         # Find the commit that introduced the test function definition
-        try:
-            file_path, test_name = test_id.split("::")
+        split_id = test_id.split("::")
+        file_path = split_id[0]
+        test_name = split_id[-1]
+        # Remove parameterisation info, e.g. test_preinfusion[Linea Micra] -> test_preinfusion
+        test_name = test_name.split("[")[0]
 
-            log_output = self.local_repo.git.log(
-                f"-L:{test_name}:{file_path}", "--reverse", "--format=%H", "--no-patch"
-            )
-            introduction_commit_sha = log_output.strip().split("\n")[0]
-            introduction_date = self.local_repo.commit(introduction_commit_sha).committed_datetime.isoformat()
+        self.local_repo.git.reset("--hard")
+        self.local_repo.git.fetch("origin", commit_sha)
+        self.local_repo.git.checkout(commit_sha)
 
-            return {
-                "introduced_in": introduction_commit_sha,
-                "introduction_date": introduction_date,
-            }
+        log_output = self.local_repo.git.log(f"-L:{test_name}:{file_path}", "--reverse", "--format=%H", "--no-patch")
+        introduction_commit_sha = log_output.strip().split("\n")[0]
+        introduction_date = self.local_repo.commit(introduction_commit_sha).committed_datetime.isoformat()
 
-        except git.exc.GitCommandError as e:
-            print(e)
-            return None
+        return {
+            "introduced_in": introduction_commit_sha,
+            "introduction_date": introduction_date,
+        }
 
-    def get_run_metadata(self, remote: Repository, run: dict) -> dict:
+    def get_run_metadata(self, run: dict) -> dict:
         """
         Finds the commit hashes associated with the run, and identifies flaky test candidates.
 
-        :param remote: The GitHub Repository.
         :param run: The workflow run.
         """
         log_url = (
@@ -134,7 +211,7 @@ class RepoMiner:
         headers = {"Authorization": f"token {self.github_token}"}
 
         response = requests.get(log_url, headers=headers, timeout=30)
-        pulls = remote.get_commit(run["head_sha"]).get_pulls()
+        pulls = self.remote.get_commit(run["head_sha"]).get_pulls()
 
         os.makedirs(f"runs/{run['id']}", exist_ok=True)
         with open(f"runs/{run['id']}/{run['id']}.zip", "wb") as f:
@@ -142,45 +219,55 @@ class RepoMiner:
 
         if response.status_code == 200 and pulls.totalCount > 0:
             pr = pulls[0]
-            failed_tests = []
-            for test_id in get_failed_tests_from_logs(response.content):
-                test_metadata = self.get_test_metadata(test_id)
-                if test_metadata:
-                    failed_tests.append({"test_id": test_id} | test_metadata)
+            failed_tests = {}
+            failure_details = self.get_failed_tests_from_logs(response.content).items()
+            # If we've got more than 10 failing tests, chances are something fundamental has gone wrong with the build
+            # and we're not observing flaky behaviour.
+            # Getting the test metadata will also be very slow for more than a few tests since it has to check out the
+            # commit and get the git log.
+            if len(failure_details) < 10:
+                for test_id, test_metadata in failure_details:
+                    try:
+                        test_metadata |= self.get_test_metadata(pr.head.sha, test_id)
+                        if test_metadata:
+                            failed_tests[test_id] = test_metadata
+                    except git.exc.GitCommandError as e:
+                        print(e)
 
-            if failed_tests:
-                return {
-                    "run_id": run["id"],
-                    "run_attempt": run["run_attempt"],
-                    "created_at": run["created_at"],
-                    "failed_tests": failed_tests,
-                    "pull_request": {
-                        "number": pr.number,
-                        "title": pr.title,
-                        "created_at": pr.created_at.isoformat(),
-                        # The Merge Commit created by GitHub for the CI run
-                        "merge_sha": run["head_sha"],
-                        # The Source (Feature Branch) commit
-                        "source_sha": pr.head.sha,
-                        # The Target (Base Branch, e.g., dev) commit
-                        "target_sha": pr.base.sha,
-                    },
-                }
+                if failed_tests:
+                    return {
+                        "run_id": run["id"],
+                        "run_attempt": run["run_attempt"],
+                        "created_at": run["created_at"],
+                        "failed_tests": failed_tests,
+                        "pull_request": {
+                            "number": pr.number,
+                            "title": pr.title,
+                            "created_at": pr.created_at.isoformat(),
+                            # The Merge Commit created by GitHub for the CI run
+                            "merge_sha": run["head_sha"],
+                            # The Source (Feature Branch) commit
+                            "source_sha": pr.head.sha,
+                            # The Target (Base Branch, e.g., dev) commit
+                            "target_sha": pr.base.sha,
+                        },
+                    }
         return None
 
-    def mine_repo(self):
+    def mine_repo(self, output_file: str):
         """
         Mine the repo for failed actions and save the result to JSON.
+        :param output_file: Where to save the results.
         """
-        output_dir = os.path.join("data", self.repo_owner, self.repo_name)
-        output_file = os.path.join(output_dir, f"{self.base_branch}.json")
-        if not os.path.exists(output_dir):
-            os.makedirs(output_dir)
 
-        remote = Github(auth=Auth.Token(self.github_token)).get_repo(f"{self.repo_owner}/{self.repo_name}")
         found_count = 0
 
-        data = []
+        # Append new data to old data if the file already exists
+        if os.path.exists(output_file):
+            with open(output_file) as f:
+                data = json.load(f)
+        else:
+            data = []
         if os.path.exists(output_file):
             with open(output_file) as f:
                 data = json.load(f)
@@ -191,13 +278,14 @@ class RepoMiner:
             "event": "pull_request",
             "conclusion": "success",
             "base": self.base_branch,
-            "name": self.workflow_name,
             # Github only keeps run logs for a maximum of 90 days for public repos
             "created": f">={(datetime.now() - timedelta(days=90)).strftime('%Y-%m-%d')}",
             "sort": "updated",
             "direction": "desc",
             "per_page": 100,
         }
+        if self.workflow_name:
+            params |= {"name": self.workflow_name}
         headers = {"Authorization": f"token {self.github_token}"}
 
         # Pagination loop for PRs (GitHub API returns 100 max per page)
@@ -216,8 +304,9 @@ class RepoMiner:
             )
             print(f"  {len(viable_runs)} viable runs")
 
+            # It would be lovely to do this in parallel, but that'll get us rate-limited!
             for run in tqdm(viable_runs):
-                metadata = self.get_run_metadata(remote, run)
+                metadata = self.get_run_metadata(run)
                 if metadata is not None and metadata not in data:
                     data.append(metadata)
                     found_count += 1
@@ -251,6 +340,11 @@ def main():
     )
     parser.add_argument("-w", "--workflow-name", help="Name of the workflow to consider, e.g. tests.yaml.")
     parser.add_argument(
+        "-l",
+        "--local-repo-path",
+        help="Location of the repo on the host system. Defaults to `repos/repo_owner/repo_name`.",
+    )
+    parser.add_argument(
         "-m",
         "--max-runs",
         help=(
@@ -260,17 +354,20 @@ def main():
         default=50,
         type=int,
     )
-    parser.add_argument("-l", "--local-repo-path", help="Path to clone the remote repo.")
+    parser.add_argument(
+        "-O",
+        "--output-json",
+        help="Where to save the output. Defaults to `data/${repo_owner}/${repo_name}/${branch_name}.json`.",
+    )
     args = parser.parse_args()
-    if not args.github_token:
-        raise ValueError("Please provide a GitHub authentication token either via the -t option of a .env file.")
-    if not args.local_repo_path:
-        args.local_repo_path = os.path.join("repos", args.repo_owner, args.repo_name)
-    os.makedirs(args.local_repo_path, exist_ok=True)
-    if not os.listdir(args.local_repo_path):
-        git.Repo.clone_from(f"https://github.com/{args.repo_owner}/{args.repo_name}.git", args.local_repo_path)
 
-    repo_miner = RepoMiner(
+    if not args.output_json:
+        output_dir = os.path.join("data", args.repo_owner, args.repo_name)
+        args.output_json = os.path.join(output_dir, f"{args.base_branch}.json")
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+
+    workflow_miner = WorkflowMiner(
         github_token=args.github_token,
         repo_owner=args.repo_owner,
         repo_name=args.repo_name,
@@ -279,7 +376,7 @@ def main():
         workflow_name=args.workflow_name,
         max_runs=args.max_runs,
     )
-    repo_miner.mine_repo()
+    workflow_miner.mine_repo(args.output_json)
 
 
 if __name__ == "__main__":

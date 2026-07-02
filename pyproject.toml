@@ -1,9 +1,10 @@
 [project]
-name = "workflow_miner"
+name = "flaky_test_dataset"
 description = "Mines GitHub CI actions for flaky workflows."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "docker>=7.1.0",
     "dotenv>=0.9.9",
     "gitpython>=3.1.46",
     "numpy>=2.2.6",
@@ -24,7 +25,8 @@ target-version = ["py310"]
 profile = "black"
 
 [project.optional-dependencies]
-test = [
+dev = [
+    "coverage>=7.14.1",
     "jsonschema>=4.26.0",
     "pre-commit>=4.6.0",
     "pytest>=9.0.3",

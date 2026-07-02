@@ -1,0 +1,92 @@
+[
+  {
+    "run_id": 27162282144,
+    "run_attempt": 1,
+    "created_at": "2026-06-08T19:39:05Z",
+    "failed_tests": {
+      "integration-tests/test_concurrency_leases.py::test_async_concurrency_with_leases": {
+        "introduced_in": "855e2d9504627b56bc34dea45f4b2578706d7ab7",
+        "introduction_date": "2025-07-21T13:16:19-05:00",
+        "passes": 0,
+        "failures": 100
+      }
+    },
+    "pull_request": {
+      "number": 22245,
+      "title": "fix: handle RecursionError in Flow.serialize_parameters",
+      "created_at": "2026-06-08T19:39:00+00:00",
+      "merge_sha": "e583c44bf5603a9e396989d39f77bad7db4ac853",
+      "source_sha": "e583c44bf5603a9e396989d39f77bad7db4ac853",
+      "target_sha": "a856f287c5054c1b43d82931fa2f6dfc0212e8f8"
+    }
+  },
+  {
+    "run_id": 27037967567,
+    "run_attempt": 1,
+    "created_at": "2026-06-05T20:18:39Z",
+    "failed_tests": {
+      "integration-tests/test_concurrency_leases.py::test_async_concurrency_with_leases": {
+        "introduced_in": "855e2d9504627b56bc34dea45f4b2578706d7ab7",
+        "introduction_date": "2025-07-21T13:16:19-05:00",
+        "passes": 0,
+        "failures": 100
+      },
+      "integration-tests/test_worker.py::test_worker": {
+        "introduced_in": "5675a1d451f4f6707c3edd7981b1306bc9e0e9c1",
+        "introduction_date": "2023-05-17T16:28:39-05:00",
+        "passes": 0,
+        "failures": 100
+      }
+    },
+    "pull_request": {
+      "number": 22238,
+      "title": "Add cancelling timeout cleanup producer",
+      "created_at": "2026-06-05T17:45:31+00:00",
+      "merge_sha": "7eb3e15974694e80bd633319c4d7ea2a1f015239",
+      "source_sha": "4e0ee7ac0263a1acbe4d4971dd6bf17d6fba6adb",
+      "target_sha": "d67b25c983b865769cbb8c4afc84387238a22cbc"
+    }
+  },
+  {
+    "run_id": 27017290085,
+    "run_attempt": 1,
+    "created_at": "2026-06-05T13:20:23Z",
+    "failed_tests": {
+      "integration-tests/test_concurrency_leases.py::test_async_concurrency_with_leases": {
+        "introduced_in": "855e2d9504627b56bc34dea45f4b2578706d7ab7",
+        "introduction_date": "2025-07-21T13:16:19-05:00",
+        "passes": 0,
+        "failures": 100
+      }
+    },
+    "pull_request": {
+      "number": 22231,
+      "title": "fix(docker): upgrade UI builder stages from bullseye to bookworm",
+      "created_at": "2026-06-05T13:20:17+00:00",
+      "merge_sha": "c072236eeb43f11313b8742c2cdca23da9de7bde",
+      "source_sha": "33b11ce7d386ffdfad8608d7d9f1e86c9a96f6cf",
+      "target_sha": "d8703a6dd6b7b7af7938efb9c20433773e38af00"
+    }
+  },
+  {
+    "run_id": 26824196608,
+    "run_attempt": 2,
+    "created_at": "2026-06-02T13:50:37Z",
+    "failed_tests": {
+      "integration-tests/test_docker_deploy.py::test_docker_deploy": {
+        "introduced_in": "547d022576e8b95b6972cac575e8cdeabf6d2aee",
+        "introduction_date": "2024-12-12T17:45:51-06:00",
+        "passes": 0,
+        "failures": 100
+      }
+    },
+    "pull_request": {
+      "number": 22179,
+      "title": "Filter stdlib paths from PYTHONPATH to prevent subprocess CLI breakage",
+      "created_at": "2026-06-01T14:10:47+00:00",
+      "merge_sha": "f4a0fd16311e7a9a25266cf38d30330b0e7362aa",
+      "source_sha": "f4a0fd16311e7a9a25266cf38d30330b0e7362aa",
+      "target_sha": "d8085e32be665064ea9bffd77c95d06c79c1d5ed"
+    }
+  }
+]
